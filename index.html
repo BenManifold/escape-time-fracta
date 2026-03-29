@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Escape-time fractals</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0c0c0f;
+        --panel: rgba(20, 20, 28, 0.92);
+        --text: #e8e8ef;
+        --muted: #9898a8;
+        --accent: #6eb5ff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+        font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+        color: var(--text);
+      }
+      #canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        cursor: grab;
+      }
+      #canvas:active {
+        cursor: grabbing;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: var(--panel);
+        backdrop-filter: blur(8px);
+        max-width: min(320px, calc(100vw - 24px));
+        font-size: 13px;
+        line-height: 1.45;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        pointer-events: auto;
+      }
+      #hud h1 {
+        margin: 0 0 8px;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      #hud label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+        color: var(--muted);
+      }
+      #hud select,
+      #hud input[type="range"] {
+        flex: 1;
+        min-width: 0;
+      }
+      #hud .hint {
+        margin-top: 10px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      #hud kbd {
+        font-family: ui-monospace, monospace;
+        font-size: 10px;
+        padding: 1px 4px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.08);
+      }
+      #status {
+        margin-top: 8px;
+        font-size: 11px;
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas" aria-label="Fractal view"></canvas>
+    <div id="hud">
+      <h1>Escape-time fractals</h1>
+      <label>
+        Fractal
+        <select id="fractal" title="Fractal family">
+          <option value="0">Mandelbrot</option>
+          <option value="1">Julia</option>
+          <option value="2">Burning Ship</option>
+          <option value="3">Tricorn</option>
+        </select>
+      </label>
+      <label>
+        Max iterations <span id="iterLabel"></span>
+        <input id="maxIter" type="range" min="32" max="2048" step="32" value="512" />
+      </label>
+      <div id="juliaPanel" hidden>
+        <label>
+          Julia Re <span id="juliaReLabel"></span>
+          <input id="juliaRe" type="range" min="-2000" max="2000" step="1" value="-727" />
+        </label>
+        <label>
+          Julia Im <span id="juliaImLabel"></span>
+          <input id="juliaIm" type="range" min="-2000" max="2000" step="1" value="189" />
+        </label>
+      </div>
+      <div class="hint">
+        <kbd>Wheel</kbd> zoom · <kbd>Drag</kbd> pan · <kbd>Arrows</kbd> /
+        <kbd>WASD</kbd> · <kbd>+</kbd><kbd>-</kbd> zoom · <kbd>Shift</kbd> finer
+      </div>
+      <div id="status"></div>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
