@@ -144,8 +144,17 @@
           </select>
         </label>
         <label>
-          Max iterations <span id="iterLabel"></span>
+          Max iter <span id="iterLabel"></span>
           <input id="maxIter" type="number" min="32" max="8192" step="1" value="1024" />
+        </label>
+        <label>
+          Palette
+          <select id="palette" title="Color mapping (same math, different look)">
+            <option value="0">Nebula</option>
+            <option value="1">Flotilla (sea &amp; fire)</option>
+            <option value="2">Classic</option>
+            <option value="3">Grayscale</option>
+          </select>
         </label>
         <div id="juliaPanel" hidden>
           <label>
@@ -157,10 +166,10 @@
             <input id="juliaIm" type="range" min="-2000" max="2000" step="1" value="189" />
           </label>
         </div>
-        <button type="button" class="hudBtn" id="applyParams">Apply iterations &amp; Julia</button>
+        <button type="button" class="hudBtn" id="applyParams">Apply</button>
         <button type="button" class="hudBtn" id="nextPreset">Next preset</button>
         <button type="button" class="hudBtn" id="resetView">Reset view</button>
-        <button type="button" class="hudBtn" id="deepZoom">Start deep zoom</button>
+        <button type="button" class="hudBtn" id="deepZoom">Deep zoom</button>
         <div class="hint">
           Click and drag on the image to draw a square; that region becomes the next view immediately. Presets jump to classic locations. Use Apply after changing max iterations or Julia sliders to re-render (avoids recomputing on every keystroke or drag). Deep zoom slowly magnifies for ~20 minutes; every ~20s it picks a new random point already on screen to drift toward, so the pan eases in instead of jumping (affine motion between WASM checkpoints).
         </div>

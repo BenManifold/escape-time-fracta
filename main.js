@@ -1,11 +1,11 @@
-import init, { alloc, dealloc, render_rgba } from "./fractal-wasm/pkg/fractal_wasm.js";
+import init, { alloc, dealloc, render_rgba, probe_escape_iter } from "./fractal-wasm/pkg/fractal_wasm.js";
 
 const CANVAS = 1000;
 const MIN_BOX_PX = 4;
 const BG = "#0c0c0f";
 
 /** Affine segment length in display frames (full WASM only at segment boundaries). */
-const CHECKPOINT_FRAMES = 600;
+const CHECKPOINT_FRAMES = 300;
 /** Wall-clock duration of the deep zoom toward f64-ish floor. */
 const DEEP_ZOOM_DURATION_MS = 20 * 60 * 1000;
 /** Pick a new on-screen point to drift toward (complex coords) this often. */
@@ -15,6 +15,14 @@ const DEEP_ZOOM_PAN_RETARGET_MS = 20 * 1000;
  * (slow pan layered on the zoom; target is always from a pixel currently on screen).
  */
 const DEEP_ZOOM_PAN_PER_SEGMENT = 0.08;
+/** Random screen probes per retarget; pick the one with escape count nearest the set (highest `n` before bail). */
+const DEEP_ZOOM_TARGET_SAMPLES = 48;
+/** Side length of screen square scanned for both interior and exterior (clamped to canvas). */
+const DEEP_ZOOM_MIXED_REGION_PX = 300;
+/** Random placements of that square before fallback scoring. */
+const DEEP_ZOOM_MIXED_PLACEMENTS = 36;
+/** Pixel step when probing the square (coarse grid, early exit when mixed). */
+const DEEP_ZOOM_MIXED_GRID_STEP = 20;
 /**
  * Practical lower bound for half-width at 1000² in f64 without perturbation.
  * Below this, coordinates lose too much precision relative to extent.
@@ -46,6 +54,7 @@ const nextPresetBtn = document.getElementById("nextPreset");
 const resetViewBtn = document.getElementById("resetView");
 const deepZoomBtn = document.getElementById("deepZoom");
 const applyParamsBtn = document.getElementById("applyParams");
+const paletteSelect = document.getElementById("palette");
 
 /** @type {Array<Array<{ centerX: number; centerY: number; halfW: number }>>} */
 const PRESETS = [
@@ -158,6 +167,16 @@ function clampMaxIter(n) {
   return Math.min(MAX_ITER_MAX, Math.max(MAX_ITER_MIN, v));
 }
 
+function clampPaletteId(n) {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v)) return 0;
+  return Math.min(3, Math.max(0, v));
+}
+
+function currentPaletteId() {
+  return clampPaletteId(Number(paletteSelect.value));
+}
+
 function readMaxIterFromInput() {
   return clampMaxIter(maxIterInput.value);
 }
@@ -197,7 +216,7 @@ function updateJuliaPanelVisibility() {
 }
 
 function buildFingerprint() {
-  return `${CANVAS}x${CANVAS}|${fractalKind}|${maxIterUser}|${julia.re}|${julia.im}`;
+  return `${CANVAS}x${CANVAS}|${fractalKind}|${maxIterUser}|${julia.re}|${julia.im}|p${currentPaletteId()}`;
 }
 
 function viewsEqual(a, b) {
@@ -216,16 +235,91 @@ function randomOnScreenPx(cw, ch) {
 }
 
 /**
- * New “thing to look at”: complex coords of a random visible pixel (under current `view`).
- * Does not jump the camera — `segC0→segC1` and later segments drift toward this slowly.
+ * Prefer exterior points that escaped late (near the set); de-prioritize interior blobs vs high‑n exterior.
+ * `iter` is from `probe_escape_iter`: in [0, maxIter) if escaped, else `maxIter` (inside).
+ */
+function panTargetScore(iter, maxIter) {
+  if (iter < maxIter) return iter;
+  return Math.floor(maxIter * 0.78);
+}
+
+/**
+ * If this axis-aligned square (screen px) contains both bounded and escaping orbits, return complex
+ * coords of its center; otherwise null.
+ */
+function mixedRegionCenterIfComplex(cw, ch, x0, y0, rw, rh) {
+  const mi = maxIterUser >>> 0;
+  const fk = fractalKind >>> 0;
+  const jr = julia.re;
+  const ji = julia.im;
+  const x1 = x0 + rw;
+  const y1 = y0 + rh;
+  let inside = false;
+  let outside = false;
+  const step = Math.max(
+    10,
+    Math.min(DEEP_ZOOM_MIXED_GRID_STEP, Math.floor(Math.min(rw, rh) / 14)),
+  );
+  for (let sy = y0 + step * 0.5; sy < y1; sy += step) {
+    for (let sx = x0 + step * 0.5; sx < x1; sx += step) {
+      const { re, im } = screenToComplex(sx, sy);
+      const iter = probe_escape_iter(re, im, mi, fk, jr, ji) >>> 0;
+      if (iter >= mi) inside = true;
+      else outside = true;
+      if (inside && outside) {
+        const cx = x0 + rw * 0.5;
+        const cy = y0 + rh * 0.5;
+        return screenToComplex(cx, cy);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Prefer a 300px window that shows both set interior and exterior; center the pan goal there.
+ * Fallback: single-point samples biased toward late escape (boundary).
+ */
+function pickDeepZoomPanTarget(cw, ch) {
+  const mi = maxIterUser >>> 0;
+  const rw = Math.min(DEEP_ZOOM_MIXED_REGION_PX, cw);
+  const rh = Math.min(DEEP_ZOOM_MIXED_REGION_PX, ch);
+  const spanX = Math.max(0, cw - rw);
+  const spanY = Math.max(0, ch - rh);
+
+  for (let a = 0; a < DEEP_ZOOM_MIXED_PLACEMENTS; a++) {
+    const x0 = spanX > 0 ? Math.floor(Math.random() * (spanX + 1)) : 0;
+    const y0 = spanY > 0 ? Math.floor(Math.random() * (spanY + 1)) : 0;
+    const p = mixedRegionCenterIfComplex(cw, ch, x0, y0, rw, rh);
+    if (p) return p;
+  }
+
+  let bestRe = view.centerX;
+  let bestIm = view.centerY;
+  let bestS = -1;
+  for (let i = 0; i < DEEP_ZOOM_TARGET_SAMPLES; i++) {
+    const { sx, sy } = randomOnScreenPx(cw, ch);
+    const { re, im } = screenToComplex(sx, sy);
+    const iter = probe_escape_iter(re, im, mi, fractalKind >>> 0, julia.re, julia.im) >>> 0;
+    const s = panTargetScore(iter, mi);
+    if (s > bestS) {
+      bestS = s;
+      bestRe = re;
+      bestIm = im;
+    }
+  }
+  return { re: bestRe, im: bestIm };
+}
+
+/**
+ * New pan goal: center of a 300px screen square that contains both interior and exterior, when found.
  */
 function retargetDeepZoomPanGoal(dz, now) {
   const cw = canvas.width;
   const ch = canvas.height;
-  const { sx, sy } = randomOnScreenPx(cw, ch);
-  const { re, im } = screenToComplex(sx, sy);
-  dz.panTargetX = re;
-  dz.panTargetY = im;
+  const p = pickDeepZoomPanTarget(cw, ch);
+  dz.panTargetX = p.re;
+  dz.panTargetY = p.im;
   dz.lastPanRetargetAt = now;
 }
 
@@ -353,7 +447,8 @@ function fullRenderAndCommit() {
     maxIterUser,
     fractalKind,
     julia.re,
-    julia.im
+    julia.im,
+    currentPaletteId() >>> 0,
   );
   const t1 = performance.now();
 
@@ -423,6 +518,7 @@ function postWorkerCheckpoint(dz) {
     fractalKind,
     juliaRe: julia.re,
     juliaIm: julia.im,
+    paletteId: currentPaletteId() >>> 0,
   });
 }
 
@@ -450,7 +546,7 @@ function applyPendingCheckpoint(pr) {
 }
 
 function updateDeepZoomButtonLabel() {
-  deepZoomBtn.textContent = deepZoom ? "Stop deep zoom" : "Start deep zoom";
+  deepZoomBtn.textContent = deepZoom ? "Stop" : "Deep zoom";
 }
 
 function cancelDeepZoom() {
@@ -469,8 +565,8 @@ function stopDeepZoom(finished) {
   cancelDeepZoom();
   if (!wasmMemory || !was) return;
   const ms = fullRenderAndCommit();
-  const tag = finished ? "deep zoom done" : "deep zoom stopped";
-  statusEl.textContent = `${canvas.width}×${canvas.height} · ${tag} · ${maxIterUser} it · ${ms.toFixed(1)} ms`;
+  const tag = finished ? "Zoom done" : "Zoom stopped";
+  statusEl.textContent = `${tag} · ${ms.toFixed(0)} ms`;
 }
 
 function startDeepZoom() {
@@ -483,7 +579,7 @@ function startDeepZoom() {
   }
 
   if (view.halfW <= DEEP_ZOOM_HALF_W_MIN * 1.0001) {
-    statusEl.textContent = `${canvas.width}×${canvas.height} · already near precision floor`;
+    statusEl.textContent = "At zoom limit";
     return;
   }
 
@@ -521,8 +617,7 @@ function startDeepZoom() {
   computeSegmentHalfWidths(deepZoom);
   {
     const dz = deepZoom;
-    const { sx, sy } = randomOnScreenPx(canvas.width, canvas.height);
-    const p = screenToComplex(sx, sy);
+    const p = pickDeepZoomPanTarget(canvas.width, canvas.height);
     dz.panTargetX = p.re;
     dz.panTargetY = p.im;
     dz.segC1x = lerp(dz.segC0x, dz.panTargetX, DEEP_ZOOM_PAN_PER_SEGMENT);
@@ -609,8 +704,8 @@ function stepDeepZoom(now) {
     dz.frameInSegment += 1;
   }
 
-  const segMsg = dz.catchingUp ? " · catching up" : "";
-  statusEl.textContent = `${cw}×${ch} · deep zoom · ${formatMmSs(elapsed)} · seg ${dz.segmentIdx + 1}/${dz.nSeg}${segMsg}`;
+  const segMsg = dz.catchingUp ? " · …" : "";
+  statusEl.textContent = `Zoom · ${formatMmSs(elapsed)}${segMsg}`;
 }
 
 function resetToDefaultView() {
@@ -624,7 +719,7 @@ function resetToDefaultView() {
   view.halfW = DEFAULT_VIEW.halfW;
   invalidateCache();
   const ms = fullRenderAndCommit();
-  statusEl.textContent = `${canvas.width}×${canvas.height} · reset · ${maxIterUser} it · ${ms.toFixed(1)} ms`;
+  statusEl.textContent = `Reset · ${ms.toFixed(0)} ms`;
 }
 
 function drawRubberOverlay() {
@@ -644,7 +739,6 @@ function frame(now) {
   const ch = canvas.height;
 
   let wasmMs = 0;
-  let mode = "";
 
   if (deepZoom) {
     stepDeepZoom(now);
@@ -659,19 +753,15 @@ function frame(now) {
 
   if (!paramsMatch) {
     wasmMs = fullRenderAndCommit();
-    mode = `render ${maxIterUser} it (cache rebuild)`;
   } else if (!viewsEqual(view, committedView)) {
     wasmMs = fullRenderAndCommit();
-    mode = `render ${maxIterUser} it (sync)`;
   } else {
     ctx.drawImage(cacheCanvas, 0, 0);
-    mode = `idle · ${maxIterUser} it`;
   }
 
   drawRubberOverlay();
 
-  statusEl.textContent =
-    wasmMs > 0 ? `${cw}×${ch} · ${mode} · ${wasmMs.toFixed(1)} ms` : `${cw}×${ch} · ${mode}`;
+  statusEl.textContent = wasmMs > 0 ? `${cw}×${ch} · ${wasmMs.toFixed(0)} ms` : `${cw}×${ch}`;
 
   requestAnimationFrame(frame);
 }
@@ -747,6 +837,10 @@ fractalSelect.addEventListener("change", () => {
   invalidateCache();
 });
 
+paletteSelect.addEventListener("change", () => {
+  invalidateCache();
+});
+
 juliaReInput.addEventListener("input", () => {
   previewJuliaLabelsFromInputs();
 });
@@ -785,6 +879,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  statusEl.textContent = "WASM failed to load. Run wasm-pack in fractal-wasm/ (see README).";
+  statusEl.textContent = "WASM failed to load (see README).";
   console.error(err);
 });

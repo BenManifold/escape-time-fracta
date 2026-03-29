@@ -33,6 +33,7 @@ self.onmessage = async (ev) => {
     fractalKind,
     juliaRe,
     juliaIm,
+    paletteId: pid = 0,
   } = msg;
 
   const aspect = ch / cw;
@@ -51,7 +52,8 @@ self.onmessage = async (ev) => {
       maxIter,
       fractalKind,
       juliaRe,
-      juliaIm
+      juliaIm,
+      pid >>> 0
     );
     const src = new Uint8ClampedArray(wasmMemory.buffer, ptr, byteLen);
     const copy = new Uint8Array(byteLen);
