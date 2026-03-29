@@ -2,8 +2,34 @@ import init, { alloc, dealloc, render_rgba } from "./fractal-wasm/pkg/fractal_wa
 
 const CANVAS = 1000;
 const MIN_BOX_PX = 4;
-const ANIM_MS = 450;
 const BG = "#0c0c0f";
+
+/** Affine segment length in display frames (full WASM only at segment boundaries). */
+const CHECKPOINT_FRAMES = 600;
+/** Wall-clock duration of the deep zoom toward f64-ish floor. */
+const DEEP_ZOOM_DURATION_MS = 20 * 60 * 1000;
+/** Pick a new on-screen point to drift toward (complex coords) this often. */
+const DEEP_ZOOM_PAN_RETARGET_MS = 20 * 1000;
+/**
+ * Each checkpoint segment, move the segment end center this fraction closer to `panTarget`
+ * (slow pan layered on the zoom; target is always from a pixel currently on screen).
+ */
+const DEEP_ZOOM_PAN_PER_SEGMENT = 0.08;
+/**
+ * Practical lower bound for half-width at 1000² in f64 without perturbation.
+ * Below this, coordinates lose too much precision relative to extent.
+ */
+const DEEP_ZOOM_HALF_W_MIN = 1e-13;
+
+const MAX_ITER_MIN = 32;
+const MAX_ITER_MAX = 8192;
+
+/** Default complex-plane window (matches initial load). */
+const DEFAULT_VIEW = Object.freeze({
+  centerX: -0.5,
+  centerY: 0,
+  halfW: 2,
+});
 
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
@@ -17,6 +43,9 @@ const juliaImInput = document.getElementById("juliaIm");
 const juliaReLabel = document.getElementById("juliaReLabel");
 const juliaImLabel = document.getElementById("juliaImLabel");
 const nextPresetBtn = document.getElementById("nextPreset");
+const resetViewBtn = document.getElementById("resetView");
+const deepZoomBtn = document.getElementById("deepZoom");
+const applyParamsBtn = document.getElementById("applyParams");
 
 /** @type {Array<Array<{ centerX: number; centerY: number; halfW: number }>>} */
 const PRESETS = [
@@ -55,9 +84,9 @@ let pixelPtr = null;
 let pixelPtrLen = 0;
 
 const view = {
-  centerX: -0.5,
-  centerY: 0,
-  halfW: 2,
+  centerX: DEFAULT_VIEW.centerX,
+  centerY: DEFAULT_VIEW.centerY,
+  halfW: DEFAULT_VIEW.halfW,
 };
 
 const julia = {
@@ -65,7 +94,7 @@ const julia = {
   im: 0.1889,
 };
 
-let maxIterUser = Number(maxIterInput.value);
+let maxIterUser = clampMaxIter(Number(maxIterInput.value));
 let fractalKind = Number(fractalSelect.value);
 
 const cacheCanvas = document.createElement("canvas");
@@ -75,15 +104,63 @@ let cacheFingerprint = "";
 let committedView = { centerX: 0, centerY: 0, halfW: 0 };
 let cacheReady = false;
 
+/** @type {Worker | null} */
+let deepZoomWorker = null;
+let deepZoomGen = 0;
+
 /**
- * @typedef {{ from: typeof view; to: typeof view; snapshotCommitted: typeof committedView; t0: number; duration: number; label: string }} Anim
- * @type {Anim | null}
+ * @typedef {{
+ *   gen: number;
+ *   t0: number;
+ *   panTargetX: number;
+ *   panTargetY: number;
+ *   segC0x: number;
+ *   segC0y: number;
+ *   segC1x: number;
+ *   segC1y: number;
+ *   logHalfW0: number;
+ *   logHalfW1: number;
+ *   nSeg: number;
+ *   segmentIdx: number;
+ *   frameInSegment: number;
+ *   commitSnapshot: { centerX: number; centerY: number; halfW: number };
+ *   hwSegStart: number;
+ *   hwSegEnd: number;
+ *   catchingUp: boolean;
+ *   lastPanRetargetAt: number;
+ * }} DeepZoomState
+ * @type {DeepZoomState | null}
  */
-let anim = null;
+let deepZoom = null;
+
+/**
+ * @typedef {{
+ *   gen: number;
+ *   segmentIdx: number;
+ *   cw: number;
+ *   ch: number;
+ *   centerX: number;
+ *   centerY: number;
+ *   halfW: number;
+ *   pixels: Uint8ClampedArray;
+ * }} PendingCheckpoint
+ * @type {PendingCheckpoint | null}
+ */
+let pendingCheckpoint = null;
 
 /** @type {{ x0: number; y0: number; x1: number; y1: number } | null} */
 let rubber = null;
 let rubberPointerId = null;
+
+function clampMaxIter(n) {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v)) return MAX_ITER_MIN;
+  return Math.min(MAX_ITER_MAX, Math.max(MAX_ITER_MIN, v));
+}
+
+function readMaxIterFromInput() {
+  return clampMaxIter(maxIterInput.value);
+}
 
 function invalidateCache() {
   cacheReady = false;
@@ -94,11 +171,24 @@ function syncIterLabel() {
   iterLabel.textContent = String(maxIterUser);
 }
 
-function syncJuliaLabels() {
+/** Update Julia readouts from sliders only (does not change `julia` or trigger render). */
+function previewJuliaLabelsFromInputs() {
+  const re = Number(juliaReInput.value) / 1000;
+  const im = Number(juliaImInput.value) / 1000;
+  juliaReLabel.textContent = Number.isFinite(re) ? re.toFixed(3) : "—";
+  juliaImLabel.textContent = Number.isFinite(im) ? im.toFixed(3) : "—";
+}
+
+/** Read inputs into applied `maxIterUser` / `julia` and invalidate cache (call after Apply or on first load). */
+function applyRenderParamsFromInputs() {
+  maxIterUser = readMaxIterFromInput();
+  maxIterInput.value = String(maxIterUser);
+  syncIterLabel();
   julia.re = Number(juliaReInput.value) / 1000;
   julia.im = Number(juliaImInput.value) / 1000;
-  juliaReLabel.textContent = julia.re.toFixed(3);
-  juliaImLabel.textContent = julia.im.toFixed(3);
+  if (!Number.isFinite(julia.re)) julia.re = 0;
+  if (!Number.isFinite(julia.im)) julia.im = 0;
+  previewJuliaLabelsFromInputs();
 }
 
 function updateJuliaPanelVisibility() {
@@ -114,13 +204,29 @@ function viewsEqual(a, b) {
   return a.centerX === b.centerX && a.centerY === b.centerY && a.halfW === b.halfW;
 }
 
-function smoothstep(t) {
-  const x = Math.min(1, Math.max(0, t));
-  return x * x * (3 - 2 * x);
-}
-
 function lerp(a, b, t) {
   return a + (b - a) * t;
+}
+
+/** Uniform random pixel in the canvas (guaranteed on-screen). */
+function randomOnScreenPx(cw, ch) {
+  const xm = Math.max(0, cw - 1);
+  const ym = Math.max(0, ch - 1);
+  return { sx: Math.random() * xm, sy: Math.random() * ym };
+}
+
+/**
+ * New “thing to look at”: complex coords of a random visible pixel (under current `view`).
+ * Does not jump the camera — `segC0→segC1` and later segments drift toward this slowly.
+ */
+function retargetDeepZoomPanGoal(dz, now) {
+  const cw = canvas.width;
+  const ch = canvas.height;
+  const { sx, sy } = randomOnScreenPx(cw, ch);
+  const { re, im } = screenToComplex(sx, sy);
+  dz.panTargetX = re;
+  dz.panTargetY = im;
+  dz.lastPanRetargetAt = now;
 }
 
 /**
@@ -270,12 +376,105 @@ function fullRenderAndCommit() {
   return t1 - t0;
 }
 
+function getDeepZoomWorker() {
+  if (!deepZoomWorker) {
+    deepZoomWorker = new Worker(new URL("./deep-zoom-worker.js", import.meta.url), { type: "module" });
+    deepZoomWorker.onmessage = onDeepZoomWorkerMessage;
+  }
+  return deepZoomWorker;
+}
+
+function onDeepZoomWorkerMessage(ev) {
+  const msg = ev.data;
+  if (msg?.type === "error") {
+    console.error("deep-zoom worker:", msg.message);
+    return;
+  }
+  if (msg?.type !== "done") return;
+  const dz = deepZoom;
+  if (!dz || msg.gen !== dz.gen) return;
+
+  const { buffer, cw, ch, centerX, centerY, halfW, segmentIdx } = msg;
+  const pixels = new Uint8ClampedArray(buffer);
+  pendingCheckpoint = {
+    gen: msg.gen,
+    segmentIdx,
+    cw,
+    ch,
+    centerX,
+    centerY,
+    halfW,
+    pixels,
+  };
+}
+
+function postWorkerCheckpoint(dz) {
+  const w = getDeepZoomWorker();
+  w.postMessage({
+    type: "render",
+    gen: dz.gen,
+    segmentIdx: dz.segmentIdx,
+    cw: canvas.width,
+    ch: canvas.height,
+    centerX: dz.segC1x,
+    centerY: dz.segC1y,
+    halfW: dz.hwSegEnd,
+    maxIter: maxIterUser,
+    fractalKind,
+    juliaRe: julia.re,
+    juliaIm: julia.im,
+  });
+}
+
+function computeSegmentHalfWidths(dz) {
+  const t0 = dz.segmentIdx / dz.nSeg;
+  const t1 = (dz.segmentIdx + 1) / dz.nSeg;
+  dz.hwSegStart = Math.exp(lerp(dz.logHalfW0, dz.logHalfW1, t0));
+  dz.hwSegEnd = Math.exp(lerp(dz.logHalfW0, dz.logHalfW1, t1));
+}
+
+function applyPendingCheckpoint(pr) {
+  const { cw, ch } = pr;
+  if (cacheCanvas.width !== cw || cacheCanvas.height !== ch) {
+    cacheCanvas.width = cw;
+    cacheCanvas.height = ch;
+  }
+  const imageData = new ImageData(pr.pixels, cw, ch);
+  cacheCtx.putImageData(imageData, 0, 0);
+  committedView = { centerX: pr.centerX, centerY: pr.centerY, halfW: pr.halfW };
+  cacheFingerprint = buildFingerprint();
+  cacheReady = true;
+  view.centerX = pr.centerX;
+  view.centerY = pr.centerY;
+  view.halfW = pr.halfW;
+}
+
+function updateDeepZoomButtonLabel() {
+  deepZoomBtn.textContent = deepZoom ? "Stop deep zoom" : "Start deep zoom";
+}
+
+function cancelDeepZoom() {
+  deepZoomGen += 1;
+  deepZoom = null;
+  pendingCheckpoint = null;
+  nextPresetBtn.disabled = false;
+  updateDeepZoomButtonLabel();
+}
+
 /**
- * @param {typeof view} toView
- * @param {string} label
+ * @param {boolean} [finished]
  */
-function startAnimation(toView, label) {
-  if (anim !== null) return;
+function stopDeepZoom(finished) {
+  const was = deepZoom !== null;
+  cancelDeepZoom();
+  if (!wasmMemory || !was) return;
+  const ms = fullRenderAndCommit();
+  const tag = finished ? "deep zoom done" : "deep zoom stopped";
+  statusEl.textContent = `${canvas.width}×${canvas.height} · ${tag} · ${maxIterUser} it · ${ms.toFixed(1)} ms`;
+}
+
+function startDeepZoom() {
+  if (!wasmMemory || deepZoom) return;
 
   const fp = buildFingerprint();
   const dimsMatch = cacheCanvas.width === canvas.width && cacheCanvas.height === canvas.height;
@@ -283,15 +482,149 @@ function startAnimation(toView, label) {
     fullRenderAndCommit();
   }
 
-  anim = {
-    from: { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW },
-    to: { centerX: toView.centerX, centerY: toView.centerY, halfW: toView.halfW },
-    snapshotCommitted: { centerX: committedView.centerX, centerY: committedView.centerY, halfW: committedView.halfW },
-    t0: performance.now(),
-    duration: ANIM_MS,
-    label,
+  if (view.halfW <= DEEP_ZOOM_HALF_W_MIN * 1.0001) {
+    statusEl.textContent = `${canvas.width}×${canvas.height} · already near precision floor`;
+    return;
+  }
+
+  const logHalfW0 = Math.log(view.halfW);
+  const logHalfW1 = Math.log(DEEP_ZOOM_HALF_W_MIN);
+  const msPerSegment = (CHECKPOINT_FRAMES / 60) * 1000;
+  const nSeg = Math.max(1, Math.ceil(DEEP_ZOOM_DURATION_MS / msPerSegment));
+
+  deepZoomGen += 1;
+  const gen = deepZoomGen;
+
+  const tStart = performance.now();
+  const c0x = view.centerX;
+  const c0y = view.centerY;
+  deepZoom = {
+    gen,
+    t0: tStart,
+    panTargetX: c0x,
+    panTargetY: c0y,
+    segC0x: c0x,
+    segC0y: c0y,
+    segC1x: c0x,
+    segC1y: c0y,
+    logHalfW0,
+    logHalfW1,
+    nSeg,
+    segmentIdx: 0,
+    frameInSegment: 0,
+    commitSnapshot: { centerX: c0x, centerY: c0y, halfW: view.halfW },
+    hwSegStart: view.halfW,
+    hwSegEnd: view.halfW,
+    catchingUp: false,
+    lastPanRetargetAt: tStart,
   };
+  computeSegmentHalfWidths(deepZoom);
+  {
+    const dz = deepZoom;
+    const { sx, sy } = randomOnScreenPx(canvas.width, canvas.height);
+    const p = screenToComplex(sx, sy);
+    dz.panTargetX = p.re;
+    dz.panTargetY = p.im;
+    dz.segC1x = lerp(dz.segC0x, dz.panTargetX, DEEP_ZOOM_PAN_PER_SEGMENT);
+    dz.segC1y = lerp(dz.segC0y, dz.panTargetY, DEEP_ZOOM_PAN_PER_SEGMENT);
+    dz.commitSnapshot = {
+      centerX: dz.segC0x,
+      centerY: dz.segC0y,
+      halfW: dz.hwSegStart,
+    };
+  }
+
+  pendingCheckpoint = null;
+  postWorkerCheckpoint(deepZoom);
   nextPresetBtn.disabled = true;
+  updateDeepZoomButtonLabel();
+}
+
+function formatMmSs(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r.toString().padStart(2, "0")}`;
+}
+
+function stepDeepZoom(now) {
+  const dz = deepZoom;
+  if (!dz) return;
+
+  const cw = canvas.width;
+  const ch = canvas.height;
+  const elapsed = now - dz.t0;
+  const lastIx = CHECKPOINT_FRAMES - 1;
+
+  if (elapsed >= DEEP_ZOOM_DURATION_MS || dz.hwSegStart <= DEEP_ZOOM_HALF_W_MIN * 1.0001) {
+    stopDeepZoom(true);
+    return;
+  }
+
+  if (now - dz.lastPanRetargetAt >= DEEP_ZOOM_PAN_RETARGET_MS) {
+    retargetDeepZoomPanGoal(dz, now);
+  }
+
+  if (dz.frameInSegment === lastIx) {
+    const pr = pendingCheckpoint;
+    if (pr && pr.gen === dz.gen && pr.segmentIdx === dz.segmentIdx) {
+      applyPendingCheckpoint(pr);
+      pendingCheckpoint = null;
+      dz.segmentIdx += 1;
+      dz.frameInSegment = 0;
+      dz.catchingUp = false;
+      if (dz.segmentIdx >= dz.nSeg) {
+        stopDeepZoom(true);
+        return;
+      }
+      computeSegmentHalfWidths(dz);
+      dz.segC0x = pr.centerX;
+      dz.segC0y = pr.centerY;
+      dz.segC1x = lerp(dz.segC0x, dz.panTargetX, DEEP_ZOOM_PAN_PER_SEGMENT);
+      dz.segC1y = lerp(dz.segC0y, dz.panTargetY, DEEP_ZOOM_PAN_PER_SEGMENT);
+      dz.commitSnapshot = {
+        centerX: dz.segC0x,
+        centerY: dz.segC0y,
+        halfW: dz.hwSegStart,
+      };
+      postWorkerCheckpoint(dz);
+    } else {
+      dz.catchingUp = true;
+    }
+  } else {
+    dz.catchingUp = false;
+  }
+
+  const f = dz.frameInSegment;
+  const alpha = f / lastIx;
+  const l0 = Math.log(dz.hwSegStart);
+  const l1 = Math.log(dz.hwSegEnd);
+  view.centerX = lerp(dz.segC0x, dz.segC1x, alpha);
+  view.centerY = lerp(dz.segC0y, dz.segC1y, alpha);
+  view.halfW = Math.exp(lerp(l0, l1, alpha));
+
+  drawWarpedCache(dz.commitSnapshot, cw, ch);
+
+  if (dz.frameInSegment < lastIx) {
+    dz.frameInSegment += 1;
+  }
+
+  const segMsg = dz.catchingUp ? " · catching up" : "";
+  statusEl.textContent = `${cw}×${ch} · deep zoom · ${formatMmSs(elapsed)} · seg ${dz.segmentIdx + 1}/${dz.nSeg}${segMsg}`;
+}
+
+function resetToDefaultView() {
+  if (!wasmMemory) return;
+  cancelDeepZoom();
+  rubber = null;
+  rubberPointerId = null;
+  nextPresetBtn.disabled = false;
+  view.centerX = DEFAULT_VIEW.centerX;
+  view.centerY = DEFAULT_VIEW.centerY;
+  view.halfW = DEFAULT_VIEW.halfW;
+  invalidateCache();
+  const ms = fullRenderAndCommit();
+  statusEl.textContent = `${canvas.width}×${canvas.height} · reset · ${maxIterUser} it · ${ms.toFixed(1)} ms`;
 }
 
 function drawRubberOverlay() {
@@ -313,30 +646,9 @@ function frame(now) {
   let wasmMs = 0;
   let mode = "";
 
-  if (anim) {
-    const rawT = (now - anim.t0) / anim.duration;
-    const t = rawT >= 1 ? 1 : rawT;
-    const u = smoothstep(t);
-
-    view.centerX = lerp(anim.from.centerX, anim.to.centerX, u);
-    view.centerY = lerp(anim.from.centerY, anim.to.centerY, u);
-    view.halfW = lerp(anim.from.halfW, anim.to.halfW, u);
-
-    drawWarpedCache(anim.snapshotCommitted, cw, ch);
+  if (deepZoom) {
+    stepDeepZoom(now);
     drawRubberOverlay();
-
-    if (t >= 1) {
-      view.centerX = anim.to.centerX;
-      view.centerY = anim.to.centerY;
-      view.halfW = anim.to.halfW;
-      const label = anim.label;
-      wasmMs = fullRenderAndCommit();
-      anim = null;
-      nextPresetBtn.disabled = false;
-      statusEl.textContent = `${cw}×${ch} · ${label} done · ${maxIterUser} it · ${wasmMs.toFixed(1)} ms`;
-    } else {
-      statusEl.textContent = `${cw}×${ch} · animating · ${anim.label} · ${(u * 100).toFixed(0)}%`;
-    }
     requestAnimationFrame(frame);
     return;
   }
@@ -365,7 +677,7 @@ function frame(now) {
 }
 
 canvas.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0 || anim !== null) return;
+  if (e.button !== 0 || deepZoom) return;
   canvas.setPointerCapture(e.pointerId);
   rubberPointerId = e.pointerId;
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
@@ -387,13 +699,16 @@ canvas.addEventListener("pointerup", (e) => {
   const { x0, y0, x1, y1 } = rubber;
   rubber = null;
 
-  if (anim !== null) return;
+  if (deepZoom) return;
 
   const { left, top, S } = squareFromDrag(x0, y0, x1, y1);
   if (S < MIN_BOX_PX) return;
 
   const toView = viewFromSquare(left, top, S);
-  startAnimation(toView, "box zoom");
+  view.centerX = toView.centerX;
+  view.centerY = toView.centerY;
+  view.halfW = toView.halfW;
+  fullRenderAndCommit();
 });
 
 canvas.addEventListener("pointercancel", (e) => {
@@ -403,39 +718,51 @@ canvas.addEventListener("pointercancel", (e) => {
   }
 });
 
+resetViewBtn.addEventListener("click", () => {
+  resetToDefaultView();
+});
+
+deepZoomBtn.addEventListener("click", () => {
+  if (deepZoom) stopDeepZoom(false);
+  else startDeepZoom();
+});
+
 nextPresetBtn.addEventListener("click", () => {
-  if (anim !== null) return;
+  if (deepZoom) return;
   const list = PRESETS[fractalKind];
   if (!list || list.length === 0) return;
   const i = presetRound[fractalKind] % list.length;
   presetRound[fractalKind] = i + 1;
   const toView = list[i];
-  startAnimation(
-    { centerX: toView.centerX, centerY: toView.centerY, halfW: toView.halfW },
-    `preset ${i + 1}/${list.length}`
-  );
+  view.centerX = toView.centerX;
+  view.centerY = toView.centerY;
+  view.halfW = toView.halfW;
+  fullRenderAndCommit();
 });
 
 fractalSelect.addEventListener("change", () => {
+  cancelDeepZoom();
   fractalKind = Number(fractalSelect.value);
   updateJuliaPanelVisibility();
   invalidateCache();
 });
 
 juliaReInput.addEventListener("input", () => {
-  syncJuliaLabels();
-  invalidateCache();
+  previewJuliaLabelsFromInputs();
 });
 
 juliaImInput.addEventListener("input", () => {
-  syncJuliaLabels();
+  previewJuliaLabelsFromInputs();
+});
+
+applyParamsBtn.addEventListener("click", () => {
+  cancelDeepZoom();
+  applyRenderParamsFromInputs();
   invalidateCache();
 });
 
-maxIterInput.addEventListener("input", () => {
-  maxIterUser = Number(maxIterInput.value);
-  syncIterLabel();
-  invalidateCache();
+maxIterInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") applyParamsBtn.click();
 });
 
 function ensureCanvasSize() {
@@ -451,9 +778,9 @@ async function main() {
   ensureCanvasSize();
   const wasm = await init();
   wasmMemory = wasm.memory;
-  syncIterLabel();
-  syncJuliaLabels();
+  applyRenderParamsFromInputs();
   updateJuliaPanelVisibility();
+  updateDeepZoomButtonLabel();
   requestAnimationFrame(frame);
 }
 

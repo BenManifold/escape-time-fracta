@@ -67,7 +67,8 @@
         color: var(--muted);
       }
       #hud select,
-      #hud input[type="range"] {
+      #hud input[type="range"],
+      #hud input[type="number"] {
         flex: 1;
         min-width: 0;
       }
@@ -76,17 +77,19 @@
         font-size: 11px;
         color: var(--muted);
       }
-      #nextPreset {
+      .hudBtn {
         margin-top: 10px;
         width: 100%;
         padding: 8px 12px;
         border-radius: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        background: rgba(110, 181, 255, 0.15);
-        color: var(--accent);
         font-size: 13px;
         font-weight: 500;
         cursor: pointer;
+      }
+      #nextPreset {
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        background: rgba(110, 181, 255, 0.15);
+        color: var(--accent);
       }
       #nextPreset:hover {
         background: rgba(110, 181, 255, 0.25);
@@ -94,6 +97,30 @@
       #nextPreset:disabled {
         opacity: 0.45;
         cursor: not-allowed;
+      }
+      #resetView {
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+      }
+      #resetView:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+      #deepZoom {
+        border: 1px solid rgba(255, 200, 120, 0.25);
+        background: rgba(255, 200, 120, 0.1);
+        color: #e8c49a;
+      }
+      #deepZoom:hover {
+        background: rgba(255, 200, 120, 0.18);
+      }
+      #applyParams {
+        border: 1px solid rgba(110, 181, 255, 0.35);
+        background: rgba(110, 181, 255, 0.12);
+        color: var(--accent);
+      }
+      #applyParams:hover {
+        background: rgba(110, 181, 255, 0.22);
       }
       #status {
         margin-top: 8px;
@@ -118,7 +145,7 @@
         </label>
         <label>
           Max iterations <span id="iterLabel"></span>
-          <input id="maxIter" type="range" min="32" max="2048" step="32" value="512" />
+          <input id="maxIter" type="number" min="32" max="8192" step="1" value="1024" />
         </label>
         <div id="juliaPanel" hidden>
           <label>
@@ -130,9 +157,12 @@
             <input id="juliaIm" type="range" min="-2000" max="2000" step="1" value="189" />
           </label>
         </div>
-        <button type="button" id="nextPreset">Next preset</button>
+        <button type="button" class="hudBtn" id="applyParams">Apply iterations &amp; Julia</button>
+        <button type="button" class="hudBtn" id="nextPreset">Next preset</button>
+        <button type="button" class="hudBtn" id="resetView">Reset view</button>
+        <button type="button" class="hudBtn" id="deepZoom">Start deep zoom</button>
         <div class="hint">
-          Click and drag on the image to draw a square. The region inside becomes the next view (animated). Presets cycle classic locations per fractal.
+          Click and drag on the image to draw a square; that region becomes the next view immediately. Presets jump to classic locations. Use Apply after changing max iterations or Julia sliders to re-render (avoids recomputing on every keystroke or drag). Deep zoom slowly magnifies for ~20 minutes; every ~20s it picks a new random point already on screen to drift toward, so the pan eases in instead of jumping (affine motion between WASM checkpoints).
         </div>
         <div id="status"></div>
       </div>
