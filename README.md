@@ -1,6 +1,6 @@
 # escape-time-fracta
 
-A high-performance escape-time fractal renderer using **WebAssembly** (SIMD128) and JavaScript. GPU acceleration is not required for the current implementation.
+A fractal renderer using **WebAssembly** and JavaScript. The Rust core maps pixels and runs the escape-time loop in **64-bit float** so deep zoom keeps correct **c** spacing (the previous **f32** path loses detail when `halfW` is very small). GPU acceleration is not used.
 
 ## Prerequisites (development)
 
@@ -36,14 +36,7 @@ wasm-pack build fractal-wasm --target web --release
 
 **Do not** pass Cargo’s `--manifest-path` to `wasm-pack build`. `wasm-pack` does not treat it as a first-class flag; it ends up in extra options forwarded to `cargo`. The build logic also scans those options for `--target` and treats the next token as a **Rust target triple**. If `--target web` (wasm-pack’s *output* mode for ES modules) lands in that list, it is misread as the triple `web`, which leads to `rustup target add web` and the error *toolchain does not support target 'web'*.
 
-This repository sets [`wasm32-unknown-unknown` rustflags](.cargo/config.toml) to enable **SIMD128** (`+simd128`) for the WASM build. For a one-off build without the repo config, you can use:
-
-```bash
-set RUSTFLAGS=-C target-feature=+simd128
-wasm-pack build --target web --release
-```
-
-(PowerShell: `$env:RUSTFLAGS='-C target-feature=+simd128'`.)
+The renderer does not require WASM SIMD or extra `RUSTFLAGS`.
 
 Output is written to `fractal-wasm/pkg/`.
 
@@ -67,4 +60,4 @@ Do not open `index.html` directly from the file system (`file://`): ES module im
 
 ## Browser note
 
-SIMD128 for WASM is supported in current Chromium-based browsers and Firefox. Safari support has improved over time; if WASM SIMD fails to load, check the browser version and console errors.
+Use a current browser with WebAssembly support. If the module fails to load, check the console for fetch/MIME or instantiation errors.

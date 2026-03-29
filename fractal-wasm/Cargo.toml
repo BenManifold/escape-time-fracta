@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["escape-time-fracta"]
 license = "GPL-3.0"
 repository = "https://github.com/BenManifold/escape-time-fracta"
-description = "WASM SIMD escape-time fractal renderer for the escape-time-fracta web app"
+description = "WASM f64 escape-time fractal renderer for the escape-time-fracta web app"
 
 [lib]
 crate-type = ["cdylib"]
