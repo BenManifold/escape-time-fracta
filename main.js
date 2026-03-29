@@ -2,9 +2,16 @@ import init, { alloc, dealloc, probe_escape_iter, fill_smooth_palette_lut } from
 import { createFractalGpuRenderer, webGpuSupported } from "./fractal-webgpu.js";
 
 const MIN_BOX_PX = 4;
-/** Clamp drawable side length (px) for GPU memory and perf. */
+/** Clamp drawable width/height (backing-store px) for GPU memory and perf. */
 const CANVAS_PX_MIN = 256;
 const CANVAS_PX_MAX = 4096;
+
+/** Pan: fraction of the visible complex width (2·halfW) per second while a pan key is held. */
+const KEY_PAN_FRAC_PER_SEC = 0.42;
+/** Zoom: |d ln(halfW)/dt| while +/− held (exponential, smooth at any frame rate). */
+const KEY_ZOOM_LOG_PER_SEC = 0.62;
+const KEYBOARD_HALF_W_MIN = 1e-16;
+const KEYBOARD_HALF_W_MAX = 96;
 
 /** Frames per affine segment; GPU checkpoint at segment start, warp until segment end. */
 const CHECKPOINT_FRAMES = 300;
@@ -85,6 +92,7 @@ let wasmMemory;
  *   captureCommit: () => void;
  *   copyWorkToCommit: () => void;
  *   resize: (w: number, h: number) => void;
+ *   releaseCommit: () => void;
  *   destroy: () => void;
  * } | null}
  */
@@ -140,6 +148,118 @@ let deepZoom = null;
 let rubber = null;
 let rubberPointerId = null;
 
+/** Held keys for smooth pan (arrows / WASD) and zoom (+/−). */
+const keysPanZoom = {
+  left: false,
+  right: false,
+  up: false,
+  down: false,
+  zoomIn: false,
+  zoomOut: false,
+};
+/** @type {number} performance.now() ms; 0 = skip dt on first frame */
+let lastKeyboardNavT = 0;
+
+function isTypingFocusTarget(target) {
+  if (!target || typeof target !== "object") return false;
+  const el = /** @type {HTMLElement} */ (target);
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  return !!el.closest?.("input, textarea, select");
+}
+
+function setKeyPanZoomFromCode(code, down) {
+  switch (code) {
+    case "ArrowLeft":
+    case "KeyA":
+      keysPanZoom.left = down;
+      return true;
+    case "ArrowRight":
+    case "KeyD":
+      keysPanZoom.right = down;
+      return true;
+    case "ArrowUp":
+    case "KeyW":
+      keysPanZoom.up = down;
+      return true;
+    case "ArrowDown":
+    case "KeyS":
+      keysPanZoom.down = down;
+      return true;
+    case "Equal":
+    case "NumpadAdd":
+      keysPanZoom.zoomIn = down;
+      return true;
+    case "Minus":
+    case "NumpadSubtract":
+      keysPanZoom.zoomOut = down;
+      return true;
+    default:
+      return false;
+  }
+}
+
+function clearKeysPanZoom() {
+  keysPanZoom.left =
+    keysPanZoom.right =
+    keysPanZoom.up =
+    keysPanZoom.down =
+    keysPanZoom.zoomIn =
+    keysPanZoom.zoomOut =
+      false;
+}
+
+/**
+ * @param {number} dtSec
+ * @returns {boolean} true if `view` changed
+ */
+function applyKeyboardPanZoom(dtSec) {
+  if (!gpuRenderer || deepZoom || dtSec <= 0) return false;
+  const k = keysPanZoom;
+  if (!k.left && !k.right && !k.up && !k.down && !k.zoomIn && !k.zoomOut) return false;
+
+  const cw = canvas.width;
+  const ch = canvas.height;
+  if (cw < 1 || ch < 1) return false;
+  const aspect = ch / cw;
+  const halfH = view.halfW * aspect;
+  const spanRe = 2 * view.halfW;
+  const spanIm = 2 * halfH;
+  const step = KEY_PAN_FRAC_PER_SEC * dtSec;
+
+  let changed = false;
+  if (k.left) {
+    view.centerX -= spanRe * step;
+    changed = true;
+  }
+  if (k.right) {
+    view.centerX += spanRe * step;
+    changed = true;
+  }
+  if (k.up) {
+    view.centerY -= spanIm * step;
+    changed = true;
+  }
+  if (k.down) {
+    view.centerY += spanIm * step;
+    changed = true;
+  }
+
+  const z = KEY_ZOOM_LOG_PER_SEC * dtSec;
+  if (k.zoomIn && !k.zoomOut) {
+    view.halfW *= Math.exp(-z);
+    changed = true;
+  } else if (k.zoomOut && !k.zoomIn) {
+    view.halfW *= Math.exp(z);
+    changed = true;
+  }
+  if (k.zoomIn || k.zoomOut) {
+    view.halfW = Math.min(KEYBOARD_HALF_W_MAX, Math.max(KEYBOARD_HALF_W_MIN, view.halfW));
+  }
+  return changed;
+}
+
 function clampMaxIter(n) {
   const v = Math.floor(Number(n));
   if (!Number.isFinite(v)) return MAX_ITER_MIN;
@@ -149,7 +269,7 @@ function clampMaxIter(n) {
 function clampPaletteId(n) {
   const v = Math.floor(Number(n));
   if (!Number.isFinite(v)) return 0;
-  return Math.min(3, Math.max(0, v));
+  return Math.min(4, Math.max(0, v));
 }
 
 function currentPaletteId() {
@@ -385,6 +505,7 @@ function cancelDeepZoom() {
   deepZoom = null;
   nextPresetBtn.disabled = false;
   updateDeepZoomButtonLabel();
+  gpuRenderer?.releaseCommit();
 }
 
 function stopDeepZoom(finished) {
@@ -568,13 +689,19 @@ function frame() {
   const ch = canvas.height;
   let ms = 0;
 
+  const now = performance.now();
+  const dtSec = lastKeyboardNavT > 0 ? Math.min(0.048, (now - lastKeyboardNavT) / 1000) : 0;
+  lastKeyboardNavT = now;
+
   if (deepZoom) {
-    stepDeepZoom(performance.now());
+    stepDeepZoom(now);
     uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
     drawRubberOverlay();
     requestAnimationFrame(frame);
     return;
   }
+
+  applyKeyboardPanZoom(dtSec);
 
   const fp = buildFingerprint();
   const paramsMatch = cacheReady && cacheFingerprint === fp;
@@ -683,6 +810,25 @@ maxIterInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") applyParamsBtn.click();
 });
 
+window.addEventListener("keydown", (e) => {
+  if (isTypingFocusTarget(e.target)) return;
+  if (!setKeyPanZoomFromCode(e.code, true)) return;
+  e.preventDefault();
+});
+
+window.addEventListener("keyup", (e) => {
+  if (!setKeyPanZoomFromCode(e.code, false)) return;
+  e.preventDefault();
+});
+
+window.addEventListener("blur", () => {
+  clearKeysPanZoom();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") clearKeysPanZoom();
+});
+
 /**
  * Match WebGPU + UI canvas backing store to the on-screen stack and DPR.
  * Re-run after GPU context creation: getContext("webgpu") can reset #canvas dimensions,
@@ -692,24 +838,23 @@ function syncStackPixelSize() {
   const stack = canvas.parentElement;
   if (!stack) return;
   const rect = stack.getBoundingClientRect();
-  // Before layout, rect can be ~0; min*DPR would clamp to CANVAS_PX_MIN (256) and look broken.
-  if (rect.width < 32 || rect.height < 32) return;
-  const cssSide = Math.max(1, Math.min(rect.width, rect.height));
+  if (rect.width < 8 || rect.height < 8) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const next = Math.round(
-    Math.min(CANVAS_PX_MAX, Math.max(CANVAS_PX_MIN, cssSide * dpr)),
-  );
+  let nw = Math.round(rect.width * dpr);
+  let nh = Math.round(rect.height * dpr);
+  nw = Math.min(CANVAS_PX_MAX, Math.max(CANVAS_PX_MIN, nw));
+  nh = Math.min(CANVAS_PX_MAX, Math.max(CANVAS_PX_MIN, nh));
   if (
-    canvas.width !== next ||
-    canvas.height !== next ||
-    uiCanvas.width !== next ||
-    uiCanvas.height !== next
+    canvas.width !== nw ||
+    canvas.height !== nh ||
+    uiCanvas.width !== nw ||
+    uiCanvas.height !== nh
   ) {
-    canvas.width = next;
-    canvas.height = next;
-    uiCanvas.width = next;
-    uiCanvas.height = next;
-    gpuRenderer?.resize(next, next);
+    canvas.width = nw;
+    canvas.height = nh;
+    uiCanvas.width = nw;
+    uiCanvas.height = nh;
+    gpuRenderer?.resize(nw, nh);
     invalidateCache();
   }
 }

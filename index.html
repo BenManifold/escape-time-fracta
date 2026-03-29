@@ -19,6 +19,7 @@
       html,
       body {
         margin: 0;
+        height: 100%;
         min-height: 100%;
         background: var(--bg);
         font-family: system-ui, "Segoe UI", Roboto, sans-serif;
@@ -26,19 +27,21 @@
       }
       .layout {
         display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        align-items: flex-start;
-        gap: 20px;
-        padding: 20px;
+        flex-direction: row;
+        align-items: stretch;
+        gap: 12px;
+        min-height: 100dvh;
+        height: 100dvh;
+        padding: 8px;
+        box-sizing: border-box;
       }
       .canvas-stack {
         position: relative;
-        width: 1000px;
-        height: 1000px;
-        max-width: calc(100vw - 40px);
-        max-height: calc(100vw - 40px);
-        aspect-ratio: 1;
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 0;
+        width: auto;
+        height: auto;
         box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
       }
       .canvas-stack canvas {
@@ -60,14 +63,18 @@
         pointer-events: auto;
       }
       #hud {
+        flex: 0 0 300px;
+        width: 300px;
+        max-width: 100%;
         padding: 12px 14px;
         border-radius: 10px;
         background: var(--panel);
         backdrop-filter: blur(8px);
-        width: min(320px, 100%);
         font-size: 13px;
         line-height: 1.45;
         border: 1px solid rgba(255, 255, 255, 0.08);
+        overflow-y: auto;
+        align-self: stretch;
       }
       #hud h1 {
         margin: 0 0 8px;
@@ -143,13 +150,29 @@
         font-size: 11px;
         color: var(--accent);
       }
+      @media (max-width: 720px) {
+        .layout {
+          flex-direction: column;
+          height: auto;
+          min-height: 100dvh;
+        }
+        #hud {
+          flex: 0 0 auto;
+          width: 100%;
+          max-height: 45dvh;
+        }
+        .canvas-stack {
+          flex: 1 1 50dvh;
+          min-height: 40dvh;
+        }
+      }
     </style>
   </head>
   <body>
     <div class="layout">
       <div class="canvas-stack">
-        <canvas id="canvas" width="1000" height="1000" aria-label="Fractal view (WebGPU)"></canvas>
-        <canvas id="canvasUi" width="1000" height="1000" aria-hidden="true"></canvas>
+        <canvas id="canvas" width="4" height="4" aria-label="Fractal view (WebGPU)"></canvas>
+        <canvas id="canvasUi" width="4" height="4" aria-hidden="true"></canvas>
       </div>
       <div id="hud">
         <h1>Escape-time fractals</h1>
@@ -173,6 +196,7 @@
             <option value="1">Flotilla (sea &amp; fire)</option>
             <option value="2">Classic</option>
             <option value="3">Grayscale</option>
+            <option value="4">Ghost ship (Wiki palette)</option>
           </select>
         </label>
         <div id="juliaPanel" hidden>
@@ -190,7 +214,7 @@
         <button type="button" class="hudBtn" id="resetView">Reset view</button>
         <button type="button" class="hudBtn" id="deepZoom">Deep zoom</button>
         <div class="hint">
-          Renderer is WebGPU (f32 escape-time; all families on GPU). Click and drag to box-zoom. Apply after changing max iter or Julia sliders. Deep zoom (~20 min) uses GPU checkpoints and affine warps between them.
+          Renderer is WebGPU (f32 escape-time; all families on GPU). Drag to box-zoom. Arrows or WASD pan; +/− (numpad too) zoom—hold for smooth motion. Apply after changing max iter or Julia sliders. Deep zoom (~20 min) uses GPU checkpoints and affine warps between them.
         </div>
         <div id="status"></div>
       </div>

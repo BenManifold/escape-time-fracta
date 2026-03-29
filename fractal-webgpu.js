@@ -62,6 +62,24 @@ fn interior_flotilla(zr: f32, zi: f32) -> vec3<f32> {
   return vec3<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0));
 }
 
+fn interior_ghost_ship(zr: f32, zi: f32) -> vec3<f32> {
+  let ang = atan2(zi, zr);
+  let w = 0.5 + 0.5 * sin(ang);
+  let r2 = zr * zr + zi * zi;
+  let rho = clamp(sqrt(r2), 0.0, 2.0) * 0.5;
+  var r = 0.038 + 0.05 * w + 0.065 * rho;
+  var g = 0.072 + 0.055 * (1.0 - w) + 0.085 * rho;
+  var b = 0.11 + 0.08 * w + 0.055 * rho;
+  g += 0.045 * rho * max(sin(ang * 2.05), 0.0);
+  b += 0.055 * rho * max(cos(ang * 2.05), 0.0);
+  r += 0.028 * rho * max(cos(ang * 1.65), 0.0);
+  let VEIL_IN = 0.24;
+  r = r * (1.0 - VEIL_IN) + BG_R * VEIL_IN;
+  g = g * (1.0 - VEIL_IN) + BG_G * VEIL_IN;
+  b = b * (1.0 - VEIL_IN) + BG_B * VEIL_IN;
+  return vec3<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0));
+}
+
 fn interior_gray(zr: f32, zi: f32) -> vec3<f32> {
   let ang = atan2(zi, zr);
   let v = 0.04 + 0.06 * (0.5 + 0.5 * sin(ang));
@@ -73,6 +91,7 @@ fn interior_rgb(zr: f32, zi: f32, pid: u32) -> vec3<f32> {
   if (pid == 1u) { return interior_flotilla(zr, zi); }
   if (pid == 2u) { return vec3<f32>(0.0, 0.0, 0.0); }
   if (pid == 3u) { return interior_gray(zr, zi); }
+  if (pid == 4u) { return interior_ghost_ship(zr, zi); }
   return interior_nebula(zr, zi);
 }
 
@@ -686,15 +705,12 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
           { binding: 1, resource: blitSampler },
         ],
       });
-      commitW = w;
-      commitH = h;
-      commitTex = device.createTexture({
-        size: [w, h],
-        format: "rgba8unorm",
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-      });
-      refreshWarpBindGroup();
     }
+  }
+
+  /** Drop deep-zoom snapshot texture (~width×height×4 bytes). Call when deep zoom ends or is cancelled. */
+  function releaseCommit() {
+    destroyCommit();
   }
 
   function destroy() {
@@ -713,6 +729,7 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     captureCommit,
     copyWorkToCommit,
     resize,
+    releaseCommit,
     destroy,
   };
 }

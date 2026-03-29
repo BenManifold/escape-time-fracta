@@ -39,7 +39,7 @@ pub fn fill_smooth_palette_lut(
         return;
     }
     let out = unsafe { core::slice::from_raw_parts_mut(out_ptr, need) };
-    let palette_id = palette_id.min(3);
+    let palette_id = palette_id.min(4);
     let denom = (n - 1) as f64;
     for i in 0..n {
         let t = (i as f64 / denom) * t_max;
@@ -53,7 +53,7 @@ pub fn fill_smooth_palette_lut(
 }
 
 /// `fractal_kind`: 0 Mandelbrot, 1 Julia, 2 Burning Ship, 3 Tricorn.
-/// `palette_id`: 0 Nebula, 1 Flotilla (burning ships / sea), 2 Classic cosine, 3 Grayscale.
+/// `palette_id`: 0 Nebula, 1 Flotilla, 2 Classic cosine, 3 Grayscale, 4 Ghost ship (Wiki-style palette).
 /// `perturb_mode`: 0 off, 1 on (Mandelbrot only), 2 auto (`half_w` &lt; threshold).
 #[wasm_bindgen]
 pub fn render_rgba(
@@ -80,7 +80,7 @@ pub fn render_rgba(
     }
     let out = unsafe { core::slice::from_raw_parts_mut(out_ptr, need) };
     let half_h = half_w * aspect_h_over_w;
-    let palette_id = palette_id.min(3);
+    let palette_id = palette_id.min(4);
     let perturb_mode = perturb_mode.min(2);
 
     let use_perturb = fractal_kind == 0
@@ -298,6 +298,29 @@ fn interior_flotilla_rgba(zr: f64, zi: f64) -> (u8, u8, u8, u8) {
     rgba_from_f64(r, g, b)
 }
 
+/// Buddhabrot “ghost ship” PNG–inspired interior: indigo depth, teal plumes, faint warm core.
+#[inline]
+fn interior_ghost_ship_rgba(zr: f64, zi: f64) -> (u8, u8, u8, u8) {
+    let ang = zi.atan2(zr);
+    let w = 0.5 + 0.5 * ang.sin();
+    let r2 = zr * zr + zi * zi;
+    let rho = r2.sqrt().clamp(0.0, 2.0) * 0.5;
+
+    let mut r = 0.038 + 0.05 * w + 0.065 * rho;
+    let mut g = 0.072 + 0.055 * (1.0 - w) + 0.085 * rho;
+    let mut b = 0.11 + 0.08 * w + 0.055 * rho;
+    g += 0.045 * rho * (ang * 2.05).sin().max(0.0);
+    b += 0.055 * rho * (ang * 2.05).cos().max(0.0);
+    r += 0.028 * rho * (ang * 1.65).cos().max(0.0);
+
+    const VEIL_IN: f64 = 0.24;
+    r = r * (1.0 - VEIL_IN) + BG_R * VEIL_IN;
+    g = g * (1.0 - VEIL_IN) + BG_G * VEIL_IN;
+    b = b * (1.0 - VEIL_IN) + BG_B * VEIL_IN;
+
+    rgba_from_f64(r, g, b)
+}
+
 #[inline]
 fn interior_classic_rgba(zr: f64, zi: f64) -> (u8, u8, u8, u8) {
     let _ = (zr, zi);
@@ -330,6 +353,7 @@ pub(crate) fn interior_by_id(zr: f64, zi: f64, palette_id: u32) -> (u8, u8, u8, 
         1 => interior_flotilla_rgba(zr, zi),
         2 => interior_classic_rgba(zr, zi),
         3 => interior_gray_rgba(zr, zi),
+        4 => interior_ghost_ship_rgba(zr, zi),
         _ => interior_nebula_rgba(zr, zi),
     }
 }
@@ -423,6 +447,58 @@ fn palette_channels_flotilla(t: f64) -> (f64, f64, f64) {
     (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
 }
 
+/// Wikipedia Buddhabrot “ghost ship” PNG: navy–indigo void, emerald/cyan masts, orange–gold hulls.
+#[inline]
+fn palette_channels_ghost_ship(t: f64) -> (f64, f64, f64) {
+    let u = t * 0.088 + 0.108;
+    // Deep night sky / water (blue-violet, not flat black)
+    let mut r = 0.038 + 0.075 * (u + 0.62).sin();
+    let mut g = 0.048 + 0.085 * (u + 2.05).sin();
+    let mut b = 0.095 + 0.15 * (u + 0.12).cos();
+
+    // Diffuse yellow-green horizon wash (mid-escape band)
+    let mid = (-((t / 17.5) - 0.82).abs() * 3.2).exp() * 0.38;
+    r += 0.065 * mid;
+    g += 0.085 * mid;
+    b += 0.025 * mid;
+
+    // Tall emerald / seafoam “sails”
+    let v = t * 0.21 + 0.38;
+    let mast = (0.5 + 0.5 * (v + 1.15).sin()) * (0.5 + 0.5 * (u * 1.85 + 3.95).cos());
+    let mast_strength = (t / 21.0).clamp(0.0, 1.0).powf(1.15);
+    g += 0.24 * mast * mast_strength;
+    b += 0.19 * mast * mast_strength;
+    r += 0.055 * mast * mast_strength;
+
+    // Burnt orange → gold hull (late escape)
+    let rig = (t / 25.0).clamp(0.0, 1.0);
+    let rig = rig * rig * (3.0 - 2.0 * rig);
+    let w1 = 0.5 + 0.5 * (u * 1.08 + 2.18).sin();
+    let w2 = 0.5 + 0.5 * (u * 0.92 + 3.55).cos();
+    let fire = rig * (0.38 + 0.62 * w1);
+    r += fire * (0.78 + 0.22 * w2);
+    g += fire * (0.4 + 0.38 * w2);
+    b += fire * 0.11;
+    r += fire * 0.2 * w2 * w2;
+    g += fire * 0.21 * w2 * w2;
+    b += fire * 0.055 * w2;
+
+    // Cyan lace on cool side of the fire front
+    let lace = fire * (1.0 - w2) * 0.4;
+    g += lace * 0.28;
+    b += lace * 0.42;
+    r += lace * 0.07;
+
+    const LR: f64 = 0.05;
+    const LG: f64 = 0.07;
+    const LB: f64 = 0.13;
+    const MIST: f64 = 0.1;
+    let r = r * (1.0 - MIST) + LR * MIST;
+    let g = g * (1.0 - MIST) + LG * MIST;
+    let b = b * (1.0 - MIST) + LB * MIST;
+    (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+}
+
 #[inline]
 fn palette_channels_gray(t: f64) -> (f64, f64, f64) {
     let u = t * 0.1 + 0.16;
@@ -449,11 +525,12 @@ pub(crate) fn palette_f64(t: f64, palette_id: u32) -> (u8, u8, u8, u8) {
     let (r, g, b) = match palette_id {
         1 => blend_smoothed_palette(t, palette_channels_flotilla),
         3 => blend_smoothed_palette(t, palette_channels_gray),
+        4 => blend_smoothed_palette(t, palette_channels_ghost_ship),
         _ => blend_smoothed_palette(t, palette_channels_nebula),
     };
 
-    // Flotilla: lighter veil so gold/greens aren’t dragged to page black
-    let veil = if palette_id == 1 { 0.07 } else { 0.20 };
+    // Flotilla / Ghost ship: lighter veil so gold and sea tones stay vivid
+    let veil = if palette_id == 1 || palette_id == 4 { 0.075 } else { 0.20 };
     let r = r * (1.0 - veil) + BG_R * veil;
     let g = g * (1.0 - veil) + BG_G * veil;
     let b = b * (1.0 - veil) + BG_B * veil;
