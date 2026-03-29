@@ -17,30 +17,45 @@ const PERTURB_TILE_PX: u32 = 160;
 /// If `|δ|²` exceeds this factor times `max(1, |Z|²)`, fall back to direct iteration for the pixel.
 const GLITCH_REL_EPS: f64 = 1e-8;
 
-/// Build `Z_0 … Z_{max_iter}` at `c_ref` (length `max_iter + 1`). `None` if the reference escapes before completing.
-fn mandelbrot_reference_orbit(cr: f64, ci: f64, max_iter: u32) -> Option<(Vec<f64>, Vec<f64>)> {
-    let cap = max_iter as usize + 1;
+/// Fills `out_zr` / `out_zi` with `Z_0 … Z_{max_iter}` at `c_ref` (length `max_iter + 1`).
+/// Reuses buffer capacity across tiles (avoids thousands of allocs per frame).
+/// Returns `false` if the reference escapes before completing.
+fn fill_reference_orbit(
+    out_zr: &mut Vec<f64>,
+    out_zi: &mut Vec<f64>,
+    cr: f64,
+    ci: f64,
+    max_iter: u32,
+) -> bool {
+    let need = max_iter as usize + 1;
+    out_zr.clear();
+    out_zi.clear();
+    if out_zr.capacity() < need {
+        out_zr.reserve(need - out_zr.capacity());
+    }
+    if out_zi.capacity() < need {
+        out_zi.reserve(need - out_zi.capacity());
+    }
+
     let mut zr = 0.0_f64;
     let mut zi = 0.0_f64;
-    let mut ref_zr = Vec::with_capacity(cap);
-    let mut ref_zi = Vec::with_capacity(cap);
-
     for k in 0..=max_iter {
-        ref_zr.push(zr);
-        ref_zi.push(zi);
+        out_zr.push(zr);
+        out_zi.push(zi);
         if k == max_iter {
             break;
         }
         if zr * zr + zi * zi >= BAILOUT {
-            return None;
+            out_zr.clear();
+            out_zi.clear();
+            return false;
         }
         let nzr = zr * zr - zi * zi + cr;
         let nzi = 2.0 * zr * zi + ci;
         zr = nzr;
         zi = nzi;
     }
-
-    Some((ref_zr, ref_zi))
+    true
 }
 
 #[inline]
@@ -220,6 +235,9 @@ pub fn render_mandelbrot_perturb(
     let bh_f = buf_height as f64;
     let tw = PERTURB_TILE_PX as usize;
 
+    let mut ref_zr: Vec<f64> = Vec::new();
+    let mut ref_zi: Vec<f64> = Vec::new();
+
     let mut ty = 0usize;
     while ty < bh {
         let y1 = (ty + tw).min(bh);
@@ -234,7 +252,7 @@ pub fn render_mandelbrot_perturb(
                 mid_px, mid_py, center_x, center_y, half_w, half_h, bw_f, bh_f, two_hw, two_hh,
             );
 
-            if let Some((ref_zr, ref_zi)) = mandelbrot_reference_orbit(cref_r, cref_i, max_iter) {
+            if fill_reference_orbit(&mut ref_zr, &mut ref_zi, cref_r, cref_i, max_iter) {
                 write_tile_perturb(
                     out,
                     bw,
@@ -253,8 +271,8 @@ pub fn render_mandelbrot_perturb(
                     two_hw,
                     two_hh,
                     max_iter,
-                    &ref_zr,
-                    &ref_zi,
+                    ref_zr.as_slice(),
+                    ref_zi.as_slice(),
                     palette_id,
                 );
             } else {

@@ -1,6 +1,19 @@
-# GPU acceleration (browser) — options for this project
+# GPU (WebGPU) in this project
 
-The app today is **CPU (WASM)** → `ImageData` → **Canvas2D**. Moving hot loops to the GPU is a separate path; perturbation and GPU are **orthogonal** (you can do either, both, or neither).
+The live renderer is **WebGPU**: WGSL **f32** escape-time per pixel, LUT from WASM, optional affine **deep zoom** between checkpoints. There is no Canvas2D fractal path in the main UI anymore.
+
+## How deep you can zoom (limits)
+
+1. **Real limit — `f32`**  
+   `centerX`, `centerY`, `halfW`, and each pixel’s `c` are **32-bit floats** (~7 decimal digits). When `halfW` gets small, the step between adjacent pixels’ `c` values loses precision relative to the orbit; the set **breaks up** (blocky/wrong) well before any JavaScript constant stops you. That is why the old WASM path used **f64** and **perturbation** for very deep Mandelbrot zooms.
+
+2. **Code clamps in `main.js`** (soft / UX, not physics)  
+   - **Keyboard +/−:** `halfW` clamped to about **`1e-16` … `96`** (`KEYBOARD_HALF_W_MIN` / `KEYBOARD_HALF_W_MAX`). The lower bound is far beyond what f32 can represent usefully for this map; it only prevents `0` or negative width.  
+   - **Deep zoom button:** animation targets down to **`halfW ≈ 1e-13`** (`DEEP_ZOOM_HALF_W_MIN`), then stops with “At zoom limit”. That matches “very zoomed” without pretending f32 stays accurate there.  
+   - **Box zoom:** `halfW` floored at **`1e-16`** when deriving the new view.
+
+3. **Hybrid path (implemented)**  
+   When `half_w < 0.02` (same threshold as `perturb::PERTURB_AUTO_HALF_W`), the app calls WASM **`render_rgba`** with **`perturb_mode = 2` (auto)**: **Mandelbrot** uses **tiled f64 perturbation** (`perturb.rs`); **Julia / Burning Ship / Tricorn** use **plain f64** escape-time (still far deeper than GPU f32). The RGBA buffer is **`writeTexture`**’d into the WebGPU work texture and **blit**’d to the swapchain. Large views can take noticeable CPU time; the status line shows **`· f64`** in that regime. Deep-zoom warps still run on the GPU but sample the CPU-rendered commit.
 
 ## WebGPU (preferred when available)
 

@@ -1,4 +1,8 @@
-import init, { alloc, dealloc, probe_escape_iter, fill_smooth_palette_lut } from "./fractal-wasm/pkg/fractal_wasm.js";
+import init, {
+  alloc,
+  dealloc,
+  fill_smooth_palette_lut,
+} from "./fractal-wasm/pkg/fractal_wasm.js";
 import { createFractalGpuRenderer, webGpuSupported } from "./fractal-webgpu.js";
 
 const MIN_BOX_PX = 4;
@@ -10,18 +14,15 @@ const CANVAS_PX_MAX = 4096;
 const KEY_PAN_FRAC_PER_SEC = 0.42;
 /** Zoom: |d ln(halfW)/dt| while +/− held (exponential, smooth at any frame rate). */
 const KEY_ZOOM_LOG_PER_SEC = 0.62;
+/** Keyboard zoom clamp (not the real precision limit; GPU f32 breaks down earlier). */
 const KEYBOARD_HALF_W_MIN = 1e-16;
 const KEYBOARD_HALF_W_MAX = 96;
 
-/** Frames per affine segment; GPU checkpoint at segment start, warp until segment end. */
-const CHECKPOINT_FRAMES = 300;
 const DEEP_ZOOM_DURATION_MS = 20 * 60 * 1000;
-const DEEP_ZOOM_PAN_RETARGET_MS = 20 * 1000;
-const DEEP_ZOOM_PAN_PER_SEGMENT = 0.08;
-const DEEP_ZOOM_TARGET_SAMPLES = 48;
-const DEEP_ZOOM_MIXED_REGION_PX = 300;
-const DEEP_ZOOM_MIXED_PLACEMENTS = 36;
-const DEEP_ZOOM_MIXED_GRID_STEP = 20;
+/** Fixed deep-zoom target in the complex plane (re, im). */
+const DEEP_ZOOM_TARGET_RE = 0;
+const DEEP_ZOOM_TARGET_IM = 1;
+/** Deep-zoom animation stops here (“At zoom limit”); still beyond comfortable f32 accuracy for fine structure. */
 const DEEP_ZOOM_HALF_W_MIN = 1e-13;
 
 const MAX_ITER_MIN = 32;
@@ -87,12 +88,7 @@ let wasmMemory;
 /**
  * @type {{
  *   drawFull: (p: object, o?: object) => number;
- *   drawCheckpoint: (p: object) => number;
- *   drawWarp: (a: object, b: object) => number;
- *   captureCommit: () => void;
- *   copyWorkToCommit: () => void;
  *   resize: (w: number, h: number) => void;
- *   releaseCommit: () => void;
  *   destroy: () => void;
  * } | null}
  */
@@ -117,28 +113,17 @@ let cacheFingerprint = "";
 let committedView = { centerX: 0, centerY: 0, halfW: 0 };
 let cacheReady = false;
 
-let deepZoomGen = 0;
-
 /**
  * @typedef {{
- *   gen: number;
  *   t0: number;
- *   panTargetX: number;
- *   panTargetY: number;
- *   segC0x: number;
- *   segC0y: number;
- *   segC1x: number;
- *   segC1y: number;
- *   logHalfW0: number;
- *   logHalfW1: number;
- *   nSeg: number;
- *   segmentIdx: number;
- *   frameInSegment: number;
- *   commitSnapshot: { centerX: number; centerY: number; halfW: number };
- *   hwSegStart: number;
- *   hwSegEnd: number;
- *   checkpointSubmitted: boolean;
- *   lastPanRetargetAt: number;
+ *   startCX: number;
+ *   startCY: number;
+ *   startHalfW: number;
+ *   targetX: number;
+ *   targetY: number;
+ *   endHalfW: number;
+ *   startMaxIter: number;
+ *   endMaxIter: number;
  * }} DeepZoomState
  * @type {DeepZoomState | null}
  */
@@ -314,7 +299,8 @@ function updateJuliaPanelVisibility() {
 function buildFingerprint() {
   const cw = canvas.width;
   const ch = canvas.height;
-  return `${cw}x${ch}|${fractalKind}|${maxIterUser}|${julia.re}|${julia.im}|p${currentPaletteId()}`;
+  const iterKey = deepZoom ? deepZoomEffectiveMaxIter() : maxIterUser;
+  return `${cw}x${ch}|${fractalKind}|${iterKey}|${julia.re}|${julia.im}|p${currentPaletteId()}`;
 }
 
 function viewsEqual(a, b) {
@@ -325,84 +311,42 @@ function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
-function randomOnScreenPx(cw, ch) {
-  const xm = Math.max(0, cw - 1);
-  const ym = Math.max(0, ch - 1);
-  return { sx: Math.random() * xm, sy: Math.random() * ym };
+/** @param {number} t */
+function smoothstep01(t) {
+  const x = Math.min(1, Math.max(0, t));
+  return x * x * (3 - 2 * x);
 }
 
-function panTargetScore(iter, maxIter) {
-  if (iter < maxIter) return iter;
-  return Math.floor(maxIter * 0.78);
+/**
+ * @param {DeepZoomState} dz
+ * @param {number} halfW
+ */
+function deepZoomIterForHalfW(dz, halfW) {
+  const l0 = Math.log(dz.startHalfW);
+  const l1 = Math.log(dz.endHalfW);
+  const lh = Math.log(Math.max(halfW, dz.endHalfW));
+  let u = (lh - l0) / (l1 - l0);
+  if (!Number.isFinite(u)) u = 1;
+  u = Math.min(1, Math.max(0, u));
+  return clampMaxIter(Math.round(lerp(dz.startMaxIter, dz.endMaxIter, u)));
 }
 
-function mixedRegionCenterIfComplex(cw, ch, x0, y0, rw, rh) {
-  const mi = maxIterUser >>> 0;
-  const fk = fractalKind >>> 0;
-  const jr = julia.re;
-  const ji = julia.im;
-  const x1 = x0 + rw;
-  const y1 = y0 + rh;
-  let inside = false;
-  let outside = false;
-  const step = Math.max(
-    10,
-    Math.min(DEEP_ZOOM_MIXED_GRID_STEP, Math.floor(Math.min(rw, rh) / 14)),
-  );
-  for (let sy = y0 + step * 0.5; sy < y1; sy += step) {
-    for (let sx = x0 + step * 0.5; sx < x1; sx += step) {
-      const { re, im } = screenToComplex(sx, sy);
-      const iter = probe_escape_iter(re, im, mi, fk, jr, ji) >>> 0;
-      if (iter >= mi) inside = true;
-      else outside = true;
-      if (inside && outside) {
-        const cx = x0 + rw * 0.5;
-        const cy = y0 + rh * 0.5;
-        return screenToComplex(cx, cy);
-      }
-    }
-  }
-  return null;
+function deepZoomEffectiveMaxIter() {
+  if (!deepZoom) return maxIterUser;
+  return deepZoomIterForHalfW(deepZoom, view.halfW);
 }
 
-function pickDeepZoomPanTarget(cw, ch) {
-  const mi = maxIterUser >>> 0;
-  const rw = Math.min(DEEP_ZOOM_MIXED_REGION_PX, cw);
-  const rh = Math.min(DEEP_ZOOM_MIXED_REGION_PX, ch);
-  const spanX = Math.max(0, cw - rw);
-  const spanY = Math.max(0, ch - rh);
-
-  for (let a = 0; a < DEEP_ZOOM_MIXED_PLACEMENTS; a++) {
-    const x0 = spanX > 0 ? Math.floor(Math.random() * (spanX + 1)) : 0;
-    const y0 = spanY > 0 ? Math.floor(Math.random() * (spanY + 1)) : 0;
-    const p = mixedRegionCenterIfComplex(cw, ch, x0, y0, rw, rh);
-    if (p) return p;
-  }
-
-  let bestRe = view.centerX;
-  let bestIm = view.centerY;
-  let bestS = -1;
-  for (let i = 0; i < DEEP_ZOOM_TARGET_SAMPLES; i++) {
-    const { sx, sy } = randomOnScreenPx(cw, ch);
-    const { re, im } = screenToComplex(sx, sy);
-    const iter = probe_escape_iter(re, im, mi, fractalKind >>> 0, julia.re, julia.im) >>> 0;
-    const s = panTargetScore(iter, mi);
-    if (s > bestS) {
-      bestS = s;
-      bestRe = re;
-      bestIm = im;
-    }
-  }
-  return { re: bestRe, im: bestIm };
-}
-
-function retargetDeepZoomPanGoal(dz, now) {
-  const cw = canvas.width;
-  const ch = canvas.height;
-  const p = pickDeepZoomPanTarget(cw, ch);
-  dz.panTargetX = p.re;
-  dz.panTargetY = p.im;
-  dz.lastPanRetargetAt = now;
+/**
+ * Scale max iterations with zoom depth (sqrt of width ratio), clamped.
+ * @param {number} startHalfW
+ * @param {number} endHalfW
+ * @param {number} baseIter
+ */
+function computeDeepZoomEndMaxIter(startHalfW, endHalfW, baseIter) {
+  const ratio = startHalfW / endHalfW;
+  if (!Number.isFinite(ratio) || ratio <= 1) return clampMaxIter(baseIter);
+  const scaled = Math.round(baseIter * Math.sqrt(ratio));
+  return Math.min(MAX_ITER_MAX, Math.max(baseIter, scaled));
 }
 
 function canvasCoords(clientX, clientY) {
@@ -415,25 +359,23 @@ function canvasCoords(clientX, clientY) {
 function gpuParams(over = {}) {
   const cw = canvas.width;
   const ch = canvas.height;
-  return {
+  const maxIter =
+    over.maxIter !== undefined ? over.maxIter >>> 0 : deepZoom ? deepZoomEffectiveMaxIter() >>> 0 : maxIterUser >>> 0;
+  const base = {
     centerX: over.centerX ?? view.centerX,
     centerY: over.centerY ?? view.centerY,
     halfW: over.halfW ?? view.halfW,
     aspect: ch / cw,
-    maxIter: maxIterUser >>> 0,
+    maxIter,
     paletteId: currentPaletteId() >>> 0,
     fractalKind: fractalKind >>> 0,
     juliaRe: julia.re,
     juliaIm: julia.im,
   };
-}
-
-function segmentEndParams(dz) {
-  return gpuParams({
-    centerX: dz.segC1x,
-    centerY: dz.segC1y,
-    halfW: dz.hwSegEnd,
-  });
+  if (deepZoom) {
+    base.paletteIter = deepZoom.endMaxIter >>> 0;
+  }
+  return base;
 }
 
 /**
@@ -489,26 +431,22 @@ function viewFromSquare(left, top, S) {
   return { centerX, centerY, halfW };
 }
 
-function computeSegmentHalfWidths(dz) {
-  const t0 = dz.segmentIdx / dz.nSeg;
-  const t1 = (dz.segmentIdx + 1) / dz.nSeg;
-  dz.hwSegStart = Math.exp(lerp(dz.logHalfW0, dz.logHalfW1, t0));
-  dz.hwSegEnd = Math.exp(lerp(dz.logHalfW0, dz.logHalfW1, t1));
-}
-
 function updateDeepZoomButtonLabel() {
   deepZoomBtn.textContent = deepZoom ? "Stop" : "Deep zoom";
 }
 
 function cancelDeepZoom() {
-  deepZoomGen += 1;
   deepZoom = null;
   nextPresetBtn.disabled = false;
   updateDeepZoomButtonLabel();
-  gpuRenderer?.releaseCommit();
 }
 
 function stopDeepZoom(finished) {
+  if (deepZoom) {
+    maxIterUser = deepZoomIterForHalfW(deepZoom, view.halfW);
+    maxIterInput.value = String(maxIterUser);
+    syncIterLabel();
+  }
   const was = deepZoom !== null;
   cancelDeepZoom();
   if (!gpuRenderer || !was) return;
@@ -524,58 +462,28 @@ function startDeepZoom() {
   if (!cacheReady || cacheFingerprint !== fp || !viewsEqual(view, committedView)) {
     fullRenderAndCommit();
   }
-  gpuRenderer.captureCommit();
 
   if (view.halfW <= DEEP_ZOOM_HALF_W_MIN * 1.0001) {
     statusEl.textContent = "At zoom limit";
     return;
   }
 
-  const logHalfW0 = Math.log(view.halfW);
-  const logHalfW1 = Math.log(DEEP_ZOOM_HALF_W_MIN);
-  const msPerSegment = (CHECKPOINT_FRAMES / 60) * 1000;
-  const nSeg = Math.max(1, Math.ceil(DEEP_ZOOM_DURATION_MS / msPerSegment));
+  const startHalfW = view.halfW;
+  const endHalfW = DEEP_ZOOM_HALF_W_MIN;
+  const startMaxIter = maxIterUser;
+  const endMaxIter = computeDeepZoomEndMaxIter(startHalfW, endHalfW, startMaxIter);
 
-  deepZoomGen += 1;
-  const gen = deepZoomGen;
-
-  const tStart = performance.now();
-  const c0x = view.centerX;
-  const c0y = view.centerY;
   deepZoom = {
-    gen,
-    t0: tStart,
-    panTargetX: c0x,
-    panTargetY: c0y,
-    segC0x: c0x,
-    segC0y: c0y,
-    segC1x: c0x,
-    segC1y: c0y,
-    logHalfW0,
-    logHalfW1,
-    nSeg,
-    segmentIdx: 0,
-    frameInSegment: 0,
-    commitSnapshot: { centerX: c0x, centerY: c0y, halfW: view.halfW },
-    hwSegStart: view.halfW,
-    hwSegEnd: view.halfW,
-    checkpointSubmitted: false,
-    lastPanRetargetAt: tStart,
+    t0: performance.now(),
+    startCX: view.centerX,
+    startCY: view.centerY,
+    startHalfW,
+    targetX: DEEP_ZOOM_TARGET_RE,
+    targetY: DEEP_ZOOM_TARGET_IM,
+    endHalfW,
+    startMaxIter,
+    endMaxIter,
   };
-  computeSegmentHalfWidths(deepZoom);
-  {
-    const dz = deepZoom;
-    const p = pickDeepZoomPanTarget(canvas.width, canvas.height);
-    dz.panTargetX = p.re;
-    dz.panTargetY = p.im;
-    dz.segC1x = lerp(dz.segC0x, dz.panTargetX, DEEP_ZOOM_PAN_PER_SEGMENT);
-    dz.segC1y = lerp(dz.segC0y, dz.panTargetY, DEEP_ZOOM_PAN_PER_SEGMENT);
-    dz.commitSnapshot = {
-      centerX: dz.segC0x,
-      centerY: dz.segC0y,
-      halfW: dz.hwSegStart,
-    };
-  }
 
   nextPresetBtn.disabled = true;
   updateDeepZoomButtonLabel();
@@ -592,69 +500,25 @@ function stepDeepZoom(now) {
   const dz = deepZoom;
   if (!dz || !gpuRenderer) return;
 
-  const cw = canvas.width;
-  const ch = canvas.height;
   const elapsed = now - dz.t0;
-  const lastIx = CHECKPOINT_FRAMES - 1;
+  const t = elapsed / DEEP_ZOOM_DURATION_MS;
 
-  if (elapsed >= DEEP_ZOOM_DURATION_MS || dz.hwSegStart <= DEEP_ZOOM_HALF_W_MIN * 1.0001) {
+  if (t >= 1) {
+    view.centerX = dz.targetX;
+    view.centerY = dz.targetY;
+    view.halfW = dz.endHalfW;
     stopDeepZoom(true);
     return;
   }
 
-  if (now - dz.lastPanRetargetAt >= DEEP_ZOOM_PAN_RETARGET_MS) {
-    retargetDeepZoomPanGoal(dz, now);
-  }
+  const u = smoothstep01(t);
+  view.centerX = lerp(dz.startCX, dz.targetX, u);
+  view.centerY = lerp(dz.startCY, dz.targetY, u);
+  view.halfW = Math.exp(lerp(Math.log(dz.startHalfW), Math.log(dz.endHalfW), u));
 
-  if (dz.frameInSegment === 0 && !dz.checkpointSubmitted) {
-    gpuRenderer.drawCheckpoint(segmentEndParams(dz));
-    dz.checkpointSubmitted = true;
-  }
-
-  if (dz.frameInSegment === lastIx) {
-    gpuRenderer.copyWorkToCommit();
-    view.centerX = dz.segC1x;
-    view.centerY = dz.segC1y;
-    view.halfW = dz.hwSegEnd;
-    committedView = { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW };
-    cacheFingerprint = buildFingerprint();
-    cacheReady = true;
-
-    dz.segmentIdx += 1;
-    dz.frameInSegment = 0;
-    if (dz.segmentIdx >= dz.nSeg) {
-      stopDeepZoom(true);
-      return;
-    }
-    computeSegmentHalfWidths(dz);
-    dz.segC0x = view.centerX;
-    dz.segC0y = view.centerY;
-    dz.segC1x = lerp(dz.segC0x, dz.panTargetX, DEEP_ZOOM_PAN_PER_SEGMENT);
-    dz.segC1y = lerp(dz.segC0y, dz.panTargetY, DEEP_ZOOM_PAN_PER_SEGMENT);
-    dz.commitSnapshot = {
-      centerX: dz.segC0x,
-      centerY: dz.segC0y,
-      halfW: dz.hwSegStart,
-    };
-    gpuRenderer.drawCheckpoint(segmentEndParams(dz));
-    dz.checkpointSubmitted = true;
-  }
-
-  const f = dz.frameInSegment;
-  const alpha = f / lastIx;
-  const l0 = Math.log(dz.hwSegStart);
-  const l1 = Math.log(dz.hwSegEnd);
-  view.centerX = lerp(dz.segC0x, dz.segC1x, alpha);
-  view.centerY = lerp(dz.segC0y, dz.segC1y, alpha);
-  view.halfW = Math.exp(lerp(l0, l1, alpha));
-
-  gpuRenderer.drawWarp(dz.commitSnapshot, view);
-
-  if (dz.frameInSegment < lastIx) {
-    dz.frameInSegment += 1;
-  }
-
-  statusEl.textContent = `Zoom · ${formatMmSs(elapsed)}`;
+  const ms = fullRenderAndCommit();
+  const it = deepZoomEffectiveMaxIter();
+  statusEl.textContent = `Zoom · ${formatMmSs(elapsed)} · ${it} iter · ${ms.toFixed(1)} ms`;
 }
 
 function resetToDefaultView() {
@@ -683,6 +547,95 @@ function drawRubberOverlay() {
   uiCtx.setLineDash([]);
 }
 
+/**
+ * @param {number} x
+ */
+function formatSci(x) {
+  if (!Number.isFinite(x)) return "—";
+  const ax = Math.abs(x);
+  if (ax >= 1e-2 && ax < 1e5) return x.toPrecision(4);
+  return x.toExponential(2);
+}
+
+/**
+ * Cheap zoom readout from `view.halfW` (half-width on Re axis; default view uses 2).
+ * @returns {string[]}
+ */
+function zoomOverlayLines() {
+  const hw = view.halfW;
+  const zoom = DEFAULT_VIEW.halfW / hw;
+  const lg = Math.log10(zoom);
+  return [
+    `Zoom ×${formatSci(zoom)}  ·  half-w ${formatSci(hw)}`,
+    `log10(zoom) ${lg.toFixed(2)}  (vs default half-w ${DEFAULT_VIEW.halfW})`,
+  ];
+}
+
+/**
+ * @param {number} re
+ * @param {number} im
+ */
+function formatLambdaJulia(re, im) {
+  const imPart = `${im >= 0 ? "+" : "−"}${formatSci(Math.abs(im))}i`;
+  return `${formatSci(re)}${imPart}`;
+}
+
+/**
+ * @returns {string[]}
+ */
+function fractalEquationOverlayLines() {
+  switch (fractalKind) {
+    case 1:
+      return [
+        "Julia",
+        `z' = z^2 + lambda,  z0 = pixel,  lambda = ${formatLambdaJulia(julia.re, julia.im)}`,
+      ];
+    case 2:
+      return [
+        "Burning Ship",
+        "z' = (|Re z| + i|Im z|)^2 + c,  z0 = 0,  c = pixel",
+      ];
+    case 3:
+      return ["Tricorn", "z' = conj(z)^2 + c,  z0 = 0,  c = pixel"];
+    default:
+      return ["Mandelbrot", "z' = z^2 + c,  z0 = 0,  c = pixel"];
+  }
+}
+
+function drawViewOverlay() {
+  const w = uiCanvas.width;
+  const h = uiCanvas.height;
+  if (w < 8 || h < 8) return;
+
+  const pad = 10;
+  const lineH = 16;
+  const zoomLines = zoomOverlayLines();
+  const eqLines = fractalEquationOverlayLines();
+  const lines = [...zoomLines, "", ...eqLines];
+
+  uiCtx.save();
+  uiCtx.font = '13px ui-monospace, "Cascadia Code", "Segoe UI Mono", Consolas, monospace';
+  uiCtx.textBaseline = "top";
+
+  let y = pad;
+  for (const line of lines) {
+    if (line === "") {
+      y += lineH * 0.35;
+      continue;
+    }
+    uiCtx.strokeStyle = "rgba(0, 0, 0, 0.72)";
+    uiCtx.lineWidth = 4;
+    uiCtx.lineJoin = "round";
+    uiCtx.miterLimit = 2;
+    uiCtx.strokeText(line, pad, y);
+    uiCtx.fillStyle = "rgba(232, 232, 239, 0.94)";
+    uiCtx.fillText(line, pad, y);
+    y += lineH;
+    if (y > h - pad) break;
+  }
+  uiCtx.restore();
+}
+
 function frame() {
   syncStackPixelSize();
   const cw = canvas.width;
@@ -696,6 +649,7 @@ function frame() {
   if (deepZoom) {
     stepDeepZoom(now);
     uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
+    drawViewOverlay();
     drawRubberOverlay();
     requestAnimationFrame(frame);
     return;
@@ -710,6 +664,7 @@ function frame() {
   }
 
   uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
+  drawViewOverlay();
   drawRubberOverlay();
 
   statusEl.textContent = ms > 0 ? `${cw}×${ch} · ${ms.toFixed(1)} ms` : `${cw}×${ch}`;

@@ -214,7 +214,7 @@
         <button type="button" class="hudBtn" id="resetView">Reset view</button>
         <button type="button" class="hudBtn" id="deepZoom">Deep zoom</button>
         <div class="hint">
-          Renderer is WebGPU (f32 escape-time; all families on GPU). Drag to box-zoom. Arrows or WASD pan; +/− (numpad too) zoom—hold for smooth motion. Apply after changing max iter or Julia sliders. Deep zoom (~20 min) uses GPU checkpoints and affine warps between them.
+          WebGPU f32 escape-time + WASM palette LUT. Drag to box-zoom; arrows/WASD pan; +/− zoom (hold). Apply after max iter / Julia changes. Deep zoom animates toward (0, 1) in the complex plane, ramps max iterations with depth, and renders each frame on the GPU.
         </div>
         <div id="status"></div>
       </div>

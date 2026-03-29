@@ -20,7 +20,7 @@ The reference \(Z_n\) is computed in extended precision (or double-double / arbi
 
 - **`src/perturb.rs`**: reference orbit at **view center** \(c_\mathrm{ref} =\) `(center_x, center_y)`, stored as `Z_0 … Z_{max_iter}` (`max_iter + 1` values). Per pixel: \(\delta_0 = 0\), \(\delta c = c - c_\mathrm{ref}\), then \(\delta_{n+1} = 2 Z_n \delta_n + \delta_n^2 + \delta c\) with the usual escape test on \(Z_n + \delta_n\).
 - **Glitch fallback**: if \(|\delta|^2\) is large relative to \(\max(1, |Z|^2)\), that pixel is recomputed with **direct** iteration (`escape_scalar_f64`).
-- **UI**: `perturb_mode` — **0** Off, **1** On (Mandelbrot when reference builds), **2** Auto when `half_w < PERTURB_AUTO_HALF_W` (0.02). If the reference escapes before `max_iter`, the whole frame uses the normal renderer.
+- **UI / Web**: `perturb_mode` — **0** Off, **1** On (Mandelbrot when reference builds), **2** Auto when `half_w < PERTURB_AUTO_HALF_W` (0.02). The live **WebGPU** page calls `render_rgba` with mode **2** whenever `half_w < 0.02`, so Mandelbrot uses this path automatically; other families get **f64 direct** there. If a tile’s reference escapes before `max_iter`, that tile uses direct iteration.
 - **Precision**: both reference and \(\delta\) are **f64**; extreme zoom still wants a **high-precision** reference orbit later.
 
 ## Roadmap

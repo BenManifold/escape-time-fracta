@@ -1,5 +1,5 @@
 /**
- * Single WebGPU path: escape-time fractals (f32), LUT from WASM, optional affine warp for deep zoom.
+ * Single WebGPU path: escape-time fractals (f32), LUT from WASM.
  */
 
 const LUT_W = 4096;
@@ -9,6 +9,13 @@ const LUT_W = 4096;
  */
 function wgslSource(src) {
   return src.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+/** Split float64 into two float32 (double-single) for extended-precision c-plane mapping. */
+function splitToDoubleSingle(x) {
+  const hi = Math.fround(x);
+  const lo = Math.fround(x - hi);
+  return [hi, lo];
 }
 
 const SHADER = /* wgsl */ `
@@ -22,7 +29,10 @@ struct Params {
   view: vec4<f32>,
   iter_pal_wh: vec4<u32>,
   kind_j: vec4<f32>,
-  tm: vec4<f32>
+  tm: vec4<f32>,
+  // Double-single: c at pixel (0.5,0.5) and per-pixel steps (Re per +x, Im per +y).
+  c_base: vec4<f32>,
+  c_step: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Params;
@@ -95,6 +105,28 @@ fn interior_rgb(zr: f32, zi: f32, pid: u32) -> vec3<f32> {
   return interior_nebula(zr, zi);
 }
 
+fn two_sum(a: f32, b: f32) -> vec2<f32> {
+  let s = a + b;
+  let bb = s - a;
+  let err = (a - (s - bb)) + (b - bb);
+  return vec2<f32>(s, err);
+}
+
+fn ds_add(ah: f32, al: f32, bh: f32, bl: f32) -> vec2<f32> {
+  let t = two_sum(ah, bh);
+  var sh = t.x;
+  var sl = t.y + al + bl;
+  let t2 = two_sum(sh, sl);
+  return vec2<f32>(t2.x, t2.y);
+}
+
+fn mul_u32_ds(n: u32, dh: f32, dl: f32) -> vec2<f32> {
+  let nf = f32(n);
+  let hi = nf * dh;
+  let lo = fma(nf, dh, -hi) + nf * dl;
+  return two_sum(hi, lo);
+}
+
 fn step_escape(zr: f32, zi: f32, cr: f32, ci: f32, fk: u32) -> vec2<f32> {
   if (fk == 2u) {
     let azr = abs(zr);
@@ -114,11 +146,6 @@ fn escape_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
   let h = u.iter_pal_wh.w;
   if (gid.x >= w || gid.y >= h) { return; }
 
-  let cx = u.view.x;
-  let cy = u.view.y;
-  let half_w = u.view.z;
-  let aspect = u.view.w;
-  let half_h = half_w * aspect;
   let max_iter = u.iter_pal_wh.x;
   let palette_id = u.iter_pal_wh.y;
   let t_max = max(u.tm.x, 1.0);
@@ -126,12 +153,13 @@ fn escape_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
   let jre = u.kind_j.y;
   let jim = u.kind_j.z;
 
-  let px = f32(gid.x) + 0.5;
-  let py = f32(gid.y) + 0.5;
-  let wf = f32(w);
-  let hf = f32(h);
-  let re = cx - half_w + (px / wf) * (2.0 * half_w);
-  let im = cy - half_h + (py / hf) * (2.0 * half_h);
+  let off_re = mul_u32_ds(gid.x, u.c_step.x, u.c_step.y);
+  let re_ds = ds_add(u.c_base.x, u.c_base.y, off_re.x, off_re.y);
+  let re = re_ds.x + re_ds.y;
+
+  let off_im = mul_u32_ds(gid.y, u.c_step.z, u.c_step.w);
+  let im_ds = ds_add(u.c_base.z, u.c_base.w, off_im.x, off_im.y);
+  let im = im_ds.x + im_ds.y;
 
   var zr: f32;
   var zi: f32;
@@ -207,34 +235,6 @@ fn fs_blit(@location(0) _uv: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @l
   let uv = pos.xy / dims;
   return textureSample(blitSrc, blitSam, uv);
 }
-
-struct WarpU {
-  ku_kv_s: vec4<f32>,
-  wh: vec2<f32>
-}
-
-@group(2) @binding(0) var<uniform> warp: WarpU;
-@group(2) @binding(1) var warpSrc: texture_2d<f32>;
-@group(2) @binding(2) var warpSam: sampler;
-
-@fragment
-fn fs_warp(@location(0) _uv: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-  let cw = warp.wh.x;
-  let ch = warp.wh.y;
-  let dx = pos.x;
-  let dy = pos.y;
-  // Ku/Kv derived with inverted vertical pixel coord (top → ch). pos.y is 0 at top, increases down.
-  let dy_warp = ch - dy;
-  let s = warp.ku_kv_s.z;
-  let src_x = dx / s + warp.ku_kv_s.x;
-  let src_y = dy_warp / s + warp.ku_kv_s.y;
-  let su = src_x / cw;
-  let sv = src_y / ch;
-  if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) {
-    return vec4<f32>(BG_R, BG_G, BG_B, 1.0);
-  }
-  return textureSampleLevel(warpSrc, warpSam, vec2<f32>(su, sv), 0.0);
-}
 `;
 
 /**
@@ -252,9 +252,20 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
   const ctx = canvas.getContext("webgpu");
   if (!ctx) throw new Error("No WebGPU canvas context");
 
+  const format = navigator.gpu.getPreferredCanvasFormat();
+
+  /** Avoid calling `configure` every frame — some drivers retain swapchain resources per call. */
+  let swapConfiguredW = -1;
+  let swapConfiguredH = -1;
+
   function configureSwapChain() {
     const nw = Math.max(1, canvas.width | 0);
     const nh = Math.max(1, canvas.height | 0);
+    if (nw === swapConfiguredW && nh === swapConfiguredH) {
+      return;
+    }
+    swapConfiguredW = nw;
+    swapConfiguredH = nh;
     const base = {
       device,
       format,
@@ -268,7 +279,6 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     }
   }
 
-  const format = navigator.gpu.getPreferredCanvasFormat();
   const wgsl = wgslSource(SHADER);
   const module = device.createShaderModule({ code: wgsl });
 
@@ -292,14 +302,6 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     ],
   });
 
-  const bindWarpLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
-    ],
-  });
-
   const layoutCompute = device.createPipelineLayout({
     bindGroupLayouts: [bindComputeLayout],
   });
@@ -312,10 +314,6 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
 
   const layoutBlit = device.createPipelineLayout({
     bindGroupLayouts: [emptyBindGroupLayout, bindBlitLayout],
-  });
-
-  const layoutWarp = device.createPipelineLayout({
-    bindGroupLayouts: [emptyBindGroupLayout, emptyBindGroupLayout, bindWarpLayout],
   });
 
   const computePipeline = device.createComputePipeline({
@@ -334,17 +332,6 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     primitive: { topology: "triangle-list" },
   });
 
-  const warpPipeline = device.createRenderPipeline({
-    layout: layoutWarp,
-    vertex: { module, entryPoint: "vs_fullscreen" },
-    fragment: {
-      module,
-      entryPoint: "fs_warp",
-      targets: [{ format }],
-    },
-    primitive: { topology: "triangle-list" },
-  });
-
   /** WebGPU requires uniform bindings to use at least 256 bytes of a buffer. */
   const UNIFORM_ALIGN = 256;
 
@@ -353,10 +340,8 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  const warpUniformBuffer = device.createBuffer({
-    size: UNIFORM_ALIGN,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  /** Params struct in WGSL: 6× vec4 = 96 bytes (rest of 256-byte uniform is padding). */
+  const paramScratch = new ArrayBuffer(256);
 
   const palSampler = device.createSampler({
     magFilter: "linear",
@@ -378,16 +363,10 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
   let lastMaxIter = 1024;
   /** @type {GPUTexture | null} */
   let workTex = null;
-  /** @type {GPUTexture | null} */
-  let commitTex = null;
-  let commitW = 0;
-  let commitH = 0;
   /** @type {GPUBindGroup | null} */
   let bindCompute = null;
   /** @type {GPUBindGroup | null} */
   let bindBlit = null;
-  /** @type {GPUBindGroup | null} */
-  let bindWarp = null;
   /** @type {GPUTexture | null} */
   let paletteTex = null;
   let lutKey = "";
@@ -397,14 +376,6 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     workTex = null;
     bindCompute = null;
     bindBlit = null;
-  }
-
-  function destroyCommit() {
-    commitTex?.destroy();
-    commitTex = null;
-    commitW = 0;
-    commitH = 0;
-    bindWarp = null;
   }
 
   function destroyPalette() {
@@ -426,24 +397,17 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     });
   }
 
-  function refreshWarpBindGroup() {
-    if (!commitTex) return;
-    bindWarp = device.createBindGroup({
-      layout: bindWarpLayout,
-      entries: [
-        { binding: 0, resource: { buffer: warpUniformBuffer } },
-        { binding: 1, resource: commitTex.createView() },
-        { binding: 2, resource: blitSampler },
-      ],
-    });
-  }
-
   function ensureWork(nw, nh) {
-    if (nw === w && nh === h && workTex) return;
+    if (nw === w && nh === h && workTex) {
+      if (paletteTex && !bindCompute) {
+        refreshComputeBindGroup();
+      }
+      return;
+    }
     destroyWork();
     w = nw;
     h = nh;
-    if (w === 0 || h === 0 || !paletteTex) return;
+    if (w === 0 || h === 0) return;
 
     workTex = device.createTexture({
       size: [w, h],
@@ -455,7 +419,9 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
         GPUTextureUsage.COPY_DST,
     });
 
-    refreshComputeBindGroup();
+    if (paletteTex) {
+      refreshComputeBindGroup();
+    }
 
     bindBlit = device.createBindGroup({
       layout: bindBlitLayout,
@@ -464,20 +430,6 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
         { binding: 1, resource: blitSampler },
       ],
     });
-  }
-
-  function ensureCommit(nw, nh) {
-    if (commitTex && commitW === nw && commitH === nh) return;
-    destroyCommit();
-    if (nw < 1 || nh < 1) return;
-    commitW = nw;
-    commitH = nh;
-    commitTex = device.createTexture({
-      size: [nw, nh],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-    refreshWarpBindGroup();
   }
 
   function ensurePalette(paletteId, maxIter) {
@@ -514,13 +466,31 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
   function writeParams(p) {
     const nw = canvas.width;
     const nh = canvas.height;
-    const tMax = Math.max((p.maxIter >>> 0) * 1.5, 64);
-    const ubo = new ArrayBuffer(64);
-    new Float32Array(ubo, 0, 4).set([p.centerX, p.centerY, p.halfW, p.aspect]);
-    new Uint32Array(ubo, 16, 4).set([p.maxIter >>> 0, p.paletteId >>> 0, nw, nh]);
-    new Float32Array(ubo, 32, 4).set([p.fractalKind >>> 0, p.juliaRe, p.juliaIm, 0]);
-    new Float32Array(ubo, 48, 4).set([tMax, 0, 0, 0]);
-    device.queue.writeBuffer(uniformBuffer, 0, ubo);
+    const maxIter = p.maxIter >>> 0;
+    const lutIter =
+      p.paletteIter !== undefined && p.paletteIter !== null ? p.paletteIter >>> 0 : maxIter;
+    const tMax = Math.max(lutIter * 1.5, 64);
+    const cx = p.centerX;
+    const cy = p.centerY;
+    const halfW = p.halfW;
+    const aspect = nh / nw;
+    const halfH = halfW * aspect;
+    const du = (2 * halfW) / nw;
+    const dv = (2 * halfH) / nh;
+    const oRe = cx - halfW + 0.5 * du;
+    const oIm = cy - halfH + 0.5 * dv;
+    const [oRh, oRl] = splitToDoubleSingle(oRe);
+    const [oIh, oIl] = splitToDoubleSingle(oIm);
+    const [duRh, duRl] = splitToDoubleSingle(du);
+    const [dvIh, dvIl] = splitToDoubleSingle(dv);
+
+    new Float32Array(paramScratch, 0, 4).set([cx, cy, halfW, aspect]);
+    new Uint32Array(paramScratch, 16, 4).set([maxIter, p.paletteId >>> 0, nw, nh]);
+    new Float32Array(paramScratch, 32, 4).set([p.fractalKind >>> 0, p.juliaRe, p.juliaIm, 0]);
+    new Float32Array(paramScratch, 48, 4).set([tMax, 0, 0, 0]);
+    new Float32Array(paramScratch, 64, 4).set([oRh, oRl, oIh, oIl]);
+    new Float32Array(paramScratch, 80, 4).set([duRh, duRl, dvIh, dvIl]);
+    device.queue.writeBuffer(uniformBuffer, 0, paramScratch);
   }
 
   /**
@@ -535,7 +505,9 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     if (nw < 1 || nh < 1) return 0;
 
     lastPaletteId = p.paletteId >>> 0;
-    lastMaxIter = p.maxIter >>> 0;
+    const lutIter =
+      p.paletteIter !== undefined && p.paletteIter !== null ? p.paletteIter >>> 0 : p.maxIter >>> 0;
+    lastMaxIter = lutIter;
 
     ensurePalette(lastPaletteId, lastMaxIter);
     ensureWork(nw, nh);
@@ -575,119 +547,12 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     return performance.now() - t0;
   }
 
-  /** Copy last compute result to commit texture (deep-zoom keyframe). */
-  function copyWorkToCommit() {
-    if (!workTex || !commitTex) return;
-    const encoder = device.createCommandEncoder();
-    encoder.copyTextureToTexture(
-      { texture: workTex },
-      { texture: commitTex },
-      [canvas.width, canvas.height],
-    );
-    device.queue.submit([encoder.finish()]);
-  }
-
-  /**
-   * After drawFull, refresh commit from work (same view).
-   */
-  function captureCommit() {
-    ensureCommit(canvas.width, canvas.height);
-    copyWorkToCommit();
-  }
-
-  /**
-   * Affine warp of commit texture (matches former 2D drawWarpedCache).
-   * @param {{ centerX: number; centerY: number; halfW: number }} committed
-   * @param {{ centerX: number; centerY: number; halfW: number }} current
-   */
-  function drawWarp(committed, current) {
-    const cw = canvas.width;
-    const ch = canvas.height;
-    if (!commitTex || cw < 1 || ch < 1 || !bindWarp) return 0;
-
-    const cx0 = committed.centerX;
-    const cy0 = committed.centerY;
-    const hw0 = committed.halfW;
-    const cx1 = current.centerX;
-    const cy1 = current.centerY;
-    const hw1 = current.halfW;
-    const aspect = ch / cw;
-    const hh0 = hw0 * aspect;
-    const hh1 = hw1 * aspect;
-
-    const Ku = (cx1 - hw1 - cx0 + hw0) * (cw / (2 * hw0));
-    const Kv = (cy1 - hh1 - cy0 + hh0) * (ch / (2 * hh0));
-    const s = hw0 / hw1;
-
-    const wubo = new ArrayBuffer(32);
-    new Float32Array(wubo, 0, 4).set([Ku, Kv, s, 0]);
-    new Float32Array(wubo, 16, 2).set([cw, ch]);
-    device.queue.writeBuffer(warpUniformBuffer, 0, wubo);
-
-    configureSwapChain();
-
-    const t0 = performance.now();
-    const encoder = device.createCommandEncoder();
-    const view = ctx.getCurrentTexture().createView();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view,
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp: "clear",
-          storeOp: "store",
-        },
-      ],
-    });
-    pass.setPipeline(warpPipeline);
-    pass.setBindGroup(0, emptyBindGroup);
-    pass.setBindGroup(1, emptyBindGroup);
-    pass.setBindGroup(2, bindWarp);
-    pass.draw(3);
-    pass.end();
-    device.queue.submit([encoder.finish()]);
-    return performance.now() - t0;
-  }
-
-  /**
-   * Segment checkpoint: render end-of-segment view into work (no present). Call copyWorkToCommit on apply.
-   */
-  function drawCheckpoint(p) {
-    return drawFull(p, { present: false });
-  }
-
-  function presentWork() {
-    if (!bindBlit || !workTex) return;
-    configureSwapChain();
-    const encoder = device.createCommandEncoder();
-    const view = ctx.getCurrentTexture().createView();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view,
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp: "clear",
-          storeOp: "store",
-        },
-      ],
-    });
-    pass.setPipeline(blitPipeline);
-    pass.setBindGroup(0, emptyBindGroup);
-    pass.setBindGroup(1, bindBlit);
-    pass.draw(3);
-    pass.end();
-    device.queue.submit([encoder.finish()]);
-  }
-
   function resize(nw, nh) {
     if (nw === w && nh === h && workTex) return;
     destroyWork();
-    destroyCommit();
     w = nw;
     h = nh;
-    commitW = 0;
-    commitH = 0;
-    if (w > 0 && h > 0 && paletteTex) {
+    if (w > 0 && h > 0) {
       workTex = device.createTexture({
         size: [w, h],
         format: "rgba8unorm",
@@ -697,7 +562,9 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
           GPUTextureUsage.COPY_SRC |
           GPUTextureUsage.COPY_DST,
       });
-      refreshComputeBindGroup();
+      if (paletteTex) {
+        refreshComputeBindGroup();
+      }
       bindBlit = device.createBindGroup({
         layout: bindBlitLayout,
         entries: [
@@ -708,28 +575,17 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
     }
   }
 
-  /** Drop deep-zoom snapshot texture (~width×height×4 bytes). Call when deep zoom ends or is cancelled. */
-  function releaseCommit() {
-    destroyCommit();
-  }
-
   function destroy() {
     destroyWork();
-    destroyCommit();
     destroyPalette();
     uniformBuffer.destroy();
-    warpUniformBuffer.destroy();
+    swapConfiguredW = -1;
+    swapConfiguredH = -1;
   }
 
   return {
     drawFull,
-    drawCheckpoint,
-    presentWork,
-    drawWarp,
-    captureCommit,
-    copyWorkToCommit,
     resize,
-    releaseCommit,
     destroy,
   };
 }
