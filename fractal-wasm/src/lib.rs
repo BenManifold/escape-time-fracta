@@ -1,6 +1,8 @@
 //! Escape-time fractal RGBA renderer (WASM).
 //! Pixel mapping and iteration use **f64** so deep zoom keeps sub-pixel c resolution.
 
+mod perturb;
+
 use wasm_bindgen::prelude::*;
 
 const BAILOUT: f64 = 4.0;
@@ -20,8 +22,39 @@ pub fn dealloc(ptr: *mut u8, len: usize) {
     }
 }
 
+/// Fills `out` with RGBA8 samples of [`palette_f64`] along smooth-iteration axis: `t` runs linearly
+/// from `0` to `t_max` over `n_entries` rows. Used by the WebGPU path to match CPU exterior colors.
+/// Requires `out_len >= n_entries * 4` and `n_entries >= 2`.
+#[wasm_bindgen]
+pub fn fill_smooth_palette_lut(
+    out_ptr: *mut u8,
+    out_len: usize,
+    n_entries: u32,
+    palette_id: u32,
+    t_max: f64,
+) {
+    let n = n_entries as usize;
+    let need = n.saturating_mul(4);
+    if out_len < need || n < 2 {
+        return;
+    }
+    let out = unsafe { core::slice::from_raw_parts_mut(out_ptr, need) };
+    let palette_id = palette_id.min(3);
+    let denom = (n - 1) as f64;
+    for i in 0..n {
+        let t = (i as f64 / denom) * t_max;
+        let (r, g, b, a) = palette_f64(t, palette_id);
+        let base = i * 4;
+        out[base] = r;
+        out[base + 1] = g;
+        out[base + 2] = b;
+        out[base + 3] = a;
+    }
+}
+
 /// `fractal_kind`: 0 Mandelbrot, 1 Julia, 2 Burning Ship, 3 Tricorn.
 /// `palette_id`: 0 Nebula, 1 Flotilla (burning ships / sea), 2 Classic cosine, 3 Grayscale.
+/// `perturb_mode`: 0 off, 1 on (Mandelbrot only), 2 auto (`half_w` &lt; threshold).
 #[wasm_bindgen]
 pub fn render_rgba(
     out_ptr: *mut u8,
@@ -37,6 +70,7 @@ pub fn render_rgba(
     julia_re: f64,
     julia_im: f64,
     palette_id: u32,
+    perturb_mode: u32,
 ) {
     let need = (buf_width as usize)
         .saturating_mul(buf_height as usize)
@@ -47,6 +81,26 @@ pub fn render_rgba(
     let out = unsafe { core::slice::from_raw_parts_mut(out_ptr, need) };
     let half_h = half_w * aspect_h_over_w;
     let palette_id = palette_id.min(3);
+    let perturb_mode = perturb_mode.min(2);
+
+    let use_perturb = fractal_kind == 0
+        && (perturb_mode == 1
+            || (perturb_mode == 2 && half_w < perturb::PERTURB_AUTO_HALF_W));
+
+    if use_perturb {
+        perturb::render_mandelbrot_perturb(
+            out,
+            buf_width,
+            buf_height,
+            center_x,
+            center_y,
+            half_w,
+            half_h,
+            max_iter,
+            palette_id,
+        );
+        return;
+    }
 
     render_all_f64(
         out,
@@ -151,7 +205,7 @@ fn render_all_f64(
     }
 }
 
-fn escape_scalar_f64(
+pub(crate) fn escape_scalar_f64(
     re: f64,
     im: f64,
     max_iter: u32,
@@ -194,7 +248,7 @@ fn escape_scalar_f64(
 }
 
 #[inline]
-fn smooth_iter_f64(n: u32, zmag: f64) -> f64 {
+pub(crate) fn smooth_iter_f64(n: u32, zmag: f64) -> f64 {
     n as f64 + 1.0 - zmag.log2().log2()
 }
 
@@ -271,7 +325,7 @@ fn rgba_from_f64(r: f64, g: f64, b: f64) -> (u8, u8, u8, u8) {
 }
 
 #[inline]
-fn interior_by_id(zr: f64, zi: f64, palette_id: u32) -> (u8, u8, u8, u8) {
+pub(crate) fn interior_by_id(zr: f64, zi: f64, palette_id: u32) -> (u8, u8, u8, u8) {
     match palette_id {
         1 => interior_flotilla_rgba(zr, zi),
         2 => interior_classic_rgba(zr, zi),
@@ -387,7 +441,7 @@ fn palette_classic_cosine(t: f64) -> (u8, u8, u8, u8) {
 }
 
 #[inline]
-fn palette_f64(t: f64, palette_id: u32) -> (u8, u8, u8, u8) {
+pub(crate) fn palette_f64(t: f64, palette_id: u32) -> (u8, u8, u8, u8) {
     if palette_id == 2 {
         return palette_classic_cosine(t);
     }

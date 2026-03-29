@@ -1,38 +1,25 @@
-import init, { alloc, dealloc, render_rgba, probe_escape_iter } from "./fractal-wasm/pkg/fractal_wasm.js";
+import init, { alloc, dealloc, probe_escape_iter, fill_smooth_palette_lut } from "./fractal-wasm/pkg/fractal_wasm.js";
+import { createFractalGpuRenderer, webGpuSupported } from "./fractal-webgpu.js";
 
-const CANVAS = 1000;
 const MIN_BOX_PX = 4;
-const BG = "#0c0c0f";
+/** Clamp drawable side length (px) for GPU memory and perf. */
+const CANVAS_PX_MIN = 256;
+const CANVAS_PX_MAX = 4096;
 
-/** Affine segment length in display frames (full WASM only at segment boundaries). */
+/** Frames per affine segment; GPU checkpoint at segment start, warp until segment end. */
 const CHECKPOINT_FRAMES = 300;
-/** Wall-clock duration of the deep zoom toward f64-ish floor. */
 const DEEP_ZOOM_DURATION_MS = 20 * 60 * 1000;
-/** Pick a new on-screen point to drift toward (complex coords) this often. */
 const DEEP_ZOOM_PAN_RETARGET_MS = 20 * 1000;
-/**
- * Each checkpoint segment, move the segment end center this fraction closer to `panTarget`
- * (slow pan layered on the zoom; target is always from a pixel currently on screen).
- */
 const DEEP_ZOOM_PAN_PER_SEGMENT = 0.08;
-/** Random screen probes per retarget; pick the one with escape count nearest the set (highest `n` before bail). */
 const DEEP_ZOOM_TARGET_SAMPLES = 48;
-/** Side length of screen square scanned for both interior and exterior (clamped to canvas). */
 const DEEP_ZOOM_MIXED_REGION_PX = 300;
-/** Random placements of that square before fallback scoring. */
 const DEEP_ZOOM_MIXED_PLACEMENTS = 36;
-/** Pixel step when probing the square (coarse grid, early exit when mixed). */
 const DEEP_ZOOM_MIXED_GRID_STEP = 20;
-/**
- * Practical lower bound for half-width at 1000² in f64 without perturbation.
- * Below this, coordinates lose too much precision relative to extent.
- */
 const DEEP_ZOOM_HALF_W_MIN = 1e-13;
 
 const MAX_ITER_MIN = 32;
 const MAX_ITER_MAX = 8192;
 
-/** Default complex-plane window (matches initial load). */
 const DEFAULT_VIEW = Object.freeze({
   centerX: -0.5,
   centerY: 0,
@@ -40,7 +27,8 @@ const DEFAULT_VIEW = Object.freeze({
 });
 
 const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+const uiCanvas = document.getElementById("canvasUi");
+const uiCtx = uiCanvas.getContext("2d", { alpha: true, desynchronized: true });
 const fractalSelect = document.getElementById("fractal");
 const maxIterInput = document.getElementById("maxIter");
 const iterLabel = document.getElementById("iterLabel");
@@ -88,9 +76,19 @@ const PRESETS = [
 const presetRound = { 0: 0, 1: 0, 2: 0, 3: 0 };
 
 let wasmMemory;
-/** @type {number | null} */
-let pixelPtr = null;
-let pixelPtrLen = 0;
+
+/**
+ * @type {{
+ *   drawFull: (p: object, o?: object) => number;
+ *   drawCheckpoint: (p: object) => number;
+ *   drawWarp: (a: object, b: object) => number;
+ *   captureCommit: () => void;
+ *   copyWorkToCommit: () => void;
+ *   resize: (w: number, h: number) => void;
+ *   destroy: () => void;
+ * } | null}
+ */
+let gpuRenderer = null;
 
 const view = {
   centerX: DEFAULT_VIEW.centerX,
@@ -106,15 +104,11 @@ const julia = {
 let maxIterUser = clampMaxIter(Number(maxIterInput.value));
 let fractalKind = Number(fractalSelect.value);
 
-const cacheCanvas = document.createElement("canvas");
-const cacheCtx = cacheCanvas.getContext("2d", { alpha: false });
 let cacheFingerprint = "";
 /** @type {{ centerX: number; centerY: number; halfW: number }} */
 let committedView = { centerX: 0, centerY: 0, halfW: 0 };
 let cacheReady = false;
 
-/** @type {Worker | null} */
-let deepZoomWorker = null;
 let deepZoomGen = 0;
 
 /**
@@ -135,27 +129,12 @@ let deepZoomGen = 0;
  *   commitSnapshot: { centerX: number; centerY: number; halfW: number };
  *   hwSegStart: number;
  *   hwSegEnd: number;
- *   catchingUp: boolean;
+ *   checkpointSubmitted: boolean;
  *   lastPanRetargetAt: number;
  * }} DeepZoomState
  * @type {DeepZoomState | null}
  */
 let deepZoom = null;
-
-/**
- * @typedef {{
- *   gen: number;
- *   segmentIdx: number;
- *   cw: number;
- *   ch: number;
- *   centerX: number;
- *   centerY: number;
- *   halfW: number;
- *   pixels: Uint8ClampedArray;
- * }} PendingCheckpoint
- * @type {PendingCheckpoint | null}
- */
-let pendingCheckpoint = null;
 
 /** @type {{ x0: number; y0: number; x1: number; y1: number } | null} */
 let rubber = null;
@@ -190,7 +169,6 @@ function syncIterLabel() {
   iterLabel.textContent = String(maxIterUser);
 }
 
-/** Update Julia readouts from sliders only (does not change `julia` or trigger render). */
 function previewJuliaLabelsFromInputs() {
   const re = Number(juliaReInput.value) / 1000;
   const im = Number(juliaImInput.value) / 1000;
@@ -198,7 +176,6 @@ function previewJuliaLabelsFromInputs() {
   juliaImLabel.textContent = Number.isFinite(im) ? im.toFixed(3) : "—";
 }
 
-/** Read inputs into applied `maxIterUser` / `julia` and invalidate cache (call after Apply or on first load). */
 function applyRenderParamsFromInputs() {
   maxIterUser = readMaxIterFromInput();
   maxIterInput.value = String(maxIterUser);
@@ -211,12 +188,13 @@ function applyRenderParamsFromInputs() {
 }
 
 function updateJuliaPanelVisibility() {
-  const isJulia = fractalKind === 1;
-  juliaPanel.hidden = !isJulia;
+  juliaPanel.hidden = fractalKind !== 1;
 }
 
 function buildFingerprint() {
-  return `${CANVAS}x${CANVAS}|${fractalKind}|${maxIterUser}|${julia.re}|${julia.im}|p${currentPaletteId()}`;
+  const cw = canvas.width;
+  const ch = canvas.height;
+  return `${cw}x${ch}|${fractalKind}|${maxIterUser}|${julia.re}|${julia.im}|p${currentPaletteId()}`;
 }
 
 function viewsEqual(a, b) {
@@ -227,26 +205,17 @@ function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
-/** Uniform random pixel in the canvas (guaranteed on-screen). */
 function randomOnScreenPx(cw, ch) {
   const xm = Math.max(0, cw - 1);
   const ym = Math.max(0, ch - 1);
   return { sx: Math.random() * xm, sy: Math.random() * ym };
 }
 
-/**
- * Prefer exterior points that escaped late (near the set); de-prioritize interior blobs vs high‑n exterior.
- * `iter` is from `probe_escape_iter`: in [0, maxIter) if escaped, else `maxIter` (inside).
- */
 function panTargetScore(iter, maxIter) {
   if (iter < maxIter) return iter;
   return Math.floor(maxIter * 0.78);
 }
 
-/**
- * If this axis-aligned square (screen px) contains both bounded and escaping orbits, return complex
- * coords of its center; otherwise null.
- */
 function mixedRegionCenterIfComplex(cw, ch, x0, y0, rw, rh) {
   const mi = maxIterUser >>> 0;
   const fk = fractalKind >>> 0;
@@ -276,10 +245,6 @@ function mixedRegionCenterIfComplex(cw, ch, x0, y0, rw, rh) {
   return null;
 }
 
-/**
- * Prefer a 300px window that shows both set interior and exterior; center the pan goal there.
- * Fallback: single-point samples biased toward late escape (boundary).
- */
 function pickDeepZoomPanTarget(cw, ch) {
   const mi = maxIterUser >>> 0;
   const rw = Math.min(DEEP_ZOOM_MIXED_REGION_PX, cw);
@@ -311,9 +276,6 @@ function pickDeepZoomPanTarget(cw, ch) {
   return { re: bestRe, im: bestIm };
 }
 
-/**
- * New pan goal: center of a 300px screen square that contains both interior and exterior, when found.
- */
 function retargetDeepZoomPanGoal(dz, now) {
   const cw = canvas.width;
   const ch = canvas.height;
@@ -323,10 +285,6 @@ function retargetDeepZoomPanGoal(dz, now) {
   dz.lastPanRetargetAt = now;
 }
 
-/**
- * @param {number} clientX
- * @param {number} clientY
- */
 function canvasCoords(clientX, clientY) {
   const r = canvas.getBoundingClientRect();
   const sx = ((clientX - r.left) / r.width) * canvas.width;
@@ -334,50 +292,42 @@ function canvasCoords(clientX, clientY) {
   return { sx, sy };
 }
 
-function drawWarpedCache(committed, cw, ch) {
-  const cx0 = committed.centerX;
-  const cy0 = committed.centerY;
-  const hw0 = committed.halfW;
-  const cx1 = view.centerX;
-  const cy1 = view.centerY;
-  const hw1 = view.halfW;
-  const aspect = ch / cw;
-  const hh0 = hw0 * aspect;
-  const hh1 = hw1 * aspect;
-
-  const Ku = (cx1 - hw1 - cx0 + hw0) * (cw / (2 * hw0));
-  const Kv = (cy1 - hh1 - cy0 + hh0) * (ch / (2 * hh0));
-  const s = hw0 / hw1;
-
-  ctx.fillStyle = BG;
-  ctx.fillRect(0, 0, cw, ch);
-
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.setTransform(s, 0, 0, s, -Ku * s, -Kv * s);
-  ctx.drawImage(cacheCanvas, 0, 0, cw, ch);
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
+function gpuParams(over = {}) {
+  const cw = canvas.width;
+  const ch = canvas.height;
+  return {
+    centerX: over.centerX ?? view.centerX,
+    centerY: over.centerY ?? view.centerY,
+    halfW: over.halfW ?? view.halfW,
+    aspect: ch / cw,
+    maxIter: maxIterUser >>> 0,
+    paletteId: currentPaletteId() >>> 0,
+    fractalKind: fractalKind >>> 0,
+    juliaRe: julia.re,
+    juliaIm: julia.im,
+  };
 }
 
-function freeBuffer() {
-  if (pixelPtr != null && pixelPtrLen > 0) {
-    dealloc(pixelPtr, pixelPtrLen);
-    pixelPtr = null;
-    pixelPtrLen = 0;
-  }
-}
-
-function ensureBuffer(byteLen) {
-  if (pixelPtr != null && pixelPtrLen === byteLen) return;
-  freeBuffer();
-  pixelPtr = alloc(byteLen);
-  pixelPtrLen = byteLen;
+function segmentEndParams(dz) {
+  return gpuParams({
+    centerX: dz.segC1x,
+    centerY: dz.segC1y,
+    halfW: dz.hwSegEnd,
+  });
 }
 
 /**
- * @param {number} sx
- * @param {number} sy
+ * @returns {number} ms
  */
+function fullRenderAndCommit() {
+  if (!gpuRenderer) return 0;
+  const ms = gpuRenderer.drawFull(gpuParams());
+  committedView = { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW };
+  cacheFingerprint = buildFingerprint();
+  cacheReady = true;
+  return ms;
+}
+
 function screenToComplex(sx, sy) {
   const w = canvas.width;
   const h = canvas.height;
@@ -388,10 +338,8 @@ function screenToComplex(sx, sy) {
   return { re, im };
 }
 
-/**
- * Square from drag diagonal, centered on segment midpoint, clamped to canvas.
- */
 function squareFromDrag(x0, y0, x1, y1) {
+  const dim = Math.min(canvas.width, canvas.height);
   const minX = Math.min(x0, x1);
   const minY = Math.min(y0, y1);
   const maxX = Math.max(x0, x1);
@@ -403,14 +351,11 @@ function squareFromDrag(x0, y0, x1, y1) {
   let top = cy - S / 2;
   if (left < 0) left = 0;
   if (top < 0) top = 0;
-  if (left + S > CANVAS) left = CANVAS - S;
-  if (top + S > CANVAS) top = CANVAS - S;
+  if (left + S > dim) left = dim - S;
+  if (top + S > dim) top = dim - S;
   return { left, top, S };
 }
 
-/**
- * Map rubber square (pixel coords) to target view using current `view`.
- */
 function viewFromSquare(left, top, S) {
   const tl = screenToComplex(left, top);
   const br = screenToComplex(left + S, top + S);
@@ -424,125 +369,11 @@ function viewFromSquare(left, top, S) {
   return { centerX, centerY, halfW };
 }
 
-/**
- * @returns {number} ms
- */
-function fullRenderAndCommit() {
-  const cw = canvas.width;
-  const ch = canvas.height;
-  const aspect = ch / cw;
-  const byteLen = cw * ch * 4;
-  ensureBuffer(byteLen);
-
-  const t0 = performance.now();
-  render_rgba(
-    pixelPtr,
-    byteLen,
-    cw,
-    ch,
-    view.centerX,
-    view.centerY,
-    view.halfW,
-    aspect,
-    maxIterUser,
-    fractalKind,
-    julia.re,
-    julia.im,
-    currentPaletteId() >>> 0,
-  );
-  const t1 = performance.now();
-
-  if (cacheCanvas.width !== cw || cacheCanvas.height !== ch) {
-    cacheCanvas.width = cw;
-    cacheCanvas.height = ch;
-  }
-
-  const src = new Uint8ClampedArray(wasmMemory.buffer, pixelPtr, byteLen);
-  const imageData = new ImageData(cw, ch);
-  imageData.data.set(src);
-  cacheCtx.putImageData(imageData, 0, 0);
-
-  committedView = { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW };
-  cacheFingerprint = buildFingerprint();
-  cacheReady = true;
-
-  ctx.drawImage(cacheCanvas, 0, 0);
-
-  return t1 - t0;
-}
-
-function getDeepZoomWorker() {
-  if (!deepZoomWorker) {
-    deepZoomWorker = new Worker(new URL("./deep-zoom-worker.js", import.meta.url), { type: "module" });
-    deepZoomWorker.onmessage = onDeepZoomWorkerMessage;
-  }
-  return deepZoomWorker;
-}
-
-function onDeepZoomWorkerMessage(ev) {
-  const msg = ev.data;
-  if (msg?.type === "error") {
-    console.error("deep-zoom worker:", msg.message);
-    return;
-  }
-  if (msg?.type !== "done") return;
-  const dz = deepZoom;
-  if (!dz || msg.gen !== dz.gen) return;
-
-  const { buffer, cw, ch, centerX, centerY, halfW, segmentIdx } = msg;
-  const pixels = new Uint8ClampedArray(buffer);
-  pendingCheckpoint = {
-    gen: msg.gen,
-    segmentIdx,
-    cw,
-    ch,
-    centerX,
-    centerY,
-    halfW,
-    pixels,
-  };
-}
-
-function postWorkerCheckpoint(dz) {
-  const w = getDeepZoomWorker();
-  w.postMessage({
-    type: "render",
-    gen: dz.gen,
-    segmentIdx: dz.segmentIdx,
-    cw: canvas.width,
-    ch: canvas.height,
-    centerX: dz.segC1x,
-    centerY: dz.segC1y,
-    halfW: dz.hwSegEnd,
-    maxIter: maxIterUser,
-    fractalKind,
-    juliaRe: julia.re,
-    juliaIm: julia.im,
-    paletteId: currentPaletteId() >>> 0,
-  });
-}
-
 function computeSegmentHalfWidths(dz) {
   const t0 = dz.segmentIdx / dz.nSeg;
   const t1 = (dz.segmentIdx + 1) / dz.nSeg;
   dz.hwSegStart = Math.exp(lerp(dz.logHalfW0, dz.logHalfW1, t0));
   dz.hwSegEnd = Math.exp(lerp(dz.logHalfW0, dz.logHalfW1, t1));
-}
-
-function applyPendingCheckpoint(pr) {
-  const { cw, ch } = pr;
-  if (cacheCanvas.width !== cw || cacheCanvas.height !== ch) {
-    cacheCanvas.width = cw;
-    cacheCanvas.height = ch;
-  }
-  const imageData = new ImageData(pr.pixels, cw, ch);
-  cacheCtx.putImageData(imageData, 0, 0);
-  committedView = { centerX: pr.centerX, centerY: pr.centerY, halfW: pr.halfW };
-  cacheFingerprint = buildFingerprint();
-  cacheReady = true;
-  view.centerX = pr.centerX;
-  view.centerY = pr.centerY;
-  view.halfW = pr.halfW;
 }
 
 function updateDeepZoomButtonLabel() {
@@ -552,31 +383,27 @@ function updateDeepZoomButtonLabel() {
 function cancelDeepZoom() {
   deepZoomGen += 1;
   deepZoom = null;
-  pendingCheckpoint = null;
   nextPresetBtn.disabled = false;
   updateDeepZoomButtonLabel();
 }
 
-/**
- * @param {boolean} [finished]
- */
 function stopDeepZoom(finished) {
   const was = deepZoom !== null;
   cancelDeepZoom();
-  if (!wasmMemory || !was) return;
+  if (!gpuRenderer || !was) return;
   const ms = fullRenderAndCommit();
   const tag = finished ? "Zoom done" : "Zoom stopped";
-  statusEl.textContent = `${tag} · ${ms.toFixed(0)} ms`;
+  statusEl.textContent = `${tag} · ${ms.toFixed(1)} ms`;
 }
 
 function startDeepZoom() {
-  if (!wasmMemory || deepZoom) return;
+  if (!wasmMemory || !gpuRenderer || deepZoom) return;
 
   const fp = buildFingerprint();
-  const dimsMatch = cacheCanvas.width === canvas.width && cacheCanvas.height === canvas.height;
-  if (!cacheReady || cacheFingerprint !== fp || !dimsMatch || !viewsEqual(view, committedView)) {
+  if (!cacheReady || cacheFingerprint !== fp || !viewsEqual(view, committedView)) {
     fullRenderAndCommit();
   }
+  gpuRenderer.captureCommit();
 
   if (view.halfW <= DEEP_ZOOM_HALF_W_MIN * 1.0001) {
     statusEl.textContent = "At zoom limit";
@@ -611,7 +438,7 @@ function startDeepZoom() {
     commitSnapshot: { centerX: c0x, centerY: c0y, halfW: view.halfW },
     hwSegStart: view.halfW,
     hwSegEnd: view.halfW,
-    catchingUp: false,
+    checkpointSubmitted: false,
     lastPanRetargetAt: tStart,
   };
   computeSegmentHalfWidths(deepZoom);
@@ -629,8 +456,6 @@ function startDeepZoom() {
     };
   }
 
-  pendingCheckpoint = null;
-  postWorkerCheckpoint(deepZoom);
   nextPresetBtn.disabled = true;
   updateDeepZoomButtonLabel();
 }
@@ -644,7 +469,7 @@ function formatMmSs(ms) {
 
 function stepDeepZoom(now) {
   const dz = deepZoom;
-  if (!dz) return;
+  if (!dz || !gpuRenderer) return;
 
   const cw = canvas.width;
   const ch = canvas.height;
@@ -660,34 +485,38 @@ function stepDeepZoom(now) {
     retargetDeepZoomPanGoal(dz, now);
   }
 
+  if (dz.frameInSegment === 0 && !dz.checkpointSubmitted) {
+    gpuRenderer.drawCheckpoint(segmentEndParams(dz));
+    dz.checkpointSubmitted = true;
+  }
+
   if (dz.frameInSegment === lastIx) {
-    const pr = pendingCheckpoint;
-    if (pr && pr.gen === dz.gen && pr.segmentIdx === dz.segmentIdx) {
-      applyPendingCheckpoint(pr);
-      pendingCheckpoint = null;
-      dz.segmentIdx += 1;
-      dz.frameInSegment = 0;
-      dz.catchingUp = false;
-      if (dz.segmentIdx >= dz.nSeg) {
-        stopDeepZoom(true);
-        return;
-      }
-      computeSegmentHalfWidths(dz);
-      dz.segC0x = pr.centerX;
-      dz.segC0y = pr.centerY;
-      dz.segC1x = lerp(dz.segC0x, dz.panTargetX, DEEP_ZOOM_PAN_PER_SEGMENT);
-      dz.segC1y = lerp(dz.segC0y, dz.panTargetY, DEEP_ZOOM_PAN_PER_SEGMENT);
-      dz.commitSnapshot = {
-        centerX: dz.segC0x,
-        centerY: dz.segC0y,
-        halfW: dz.hwSegStart,
-      };
-      postWorkerCheckpoint(dz);
-    } else {
-      dz.catchingUp = true;
+    gpuRenderer.copyWorkToCommit();
+    view.centerX = dz.segC1x;
+    view.centerY = dz.segC1y;
+    view.halfW = dz.hwSegEnd;
+    committedView = { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW };
+    cacheFingerprint = buildFingerprint();
+    cacheReady = true;
+
+    dz.segmentIdx += 1;
+    dz.frameInSegment = 0;
+    if (dz.segmentIdx >= dz.nSeg) {
+      stopDeepZoom(true);
+      return;
     }
-  } else {
-    dz.catchingUp = false;
+    computeSegmentHalfWidths(dz);
+    dz.segC0x = view.centerX;
+    dz.segC0y = view.centerY;
+    dz.segC1x = lerp(dz.segC0x, dz.panTargetX, DEEP_ZOOM_PAN_PER_SEGMENT);
+    dz.segC1y = lerp(dz.segC0y, dz.panTargetY, DEEP_ZOOM_PAN_PER_SEGMENT);
+    dz.commitSnapshot = {
+      centerX: dz.segC0x,
+      centerY: dz.segC0y,
+      halfW: dz.hwSegStart,
+    };
+    gpuRenderer.drawCheckpoint(segmentEndParams(dz));
+    dz.checkpointSubmitted = true;
   }
 
   const f = dz.frameInSegment;
@@ -698,18 +527,17 @@ function stepDeepZoom(now) {
   view.centerY = lerp(dz.segC0y, dz.segC1y, alpha);
   view.halfW = Math.exp(lerp(l0, l1, alpha));
 
-  drawWarpedCache(dz.commitSnapshot, cw, ch);
+  gpuRenderer.drawWarp(dz.commitSnapshot, view);
 
   if (dz.frameInSegment < lastIx) {
     dz.frameInSegment += 1;
   }
 
-  const segMsg = dz.catchingUp ? " · …" : "";
-  statusEl.textContent = `Zoom · ${formatMmSs(elapsed)}${segMsg}`;
+  statusEl.textContent = `Zoom · ${formatMmSs(elapsed)}`;
 }
 
 function resetToDefaultView() {
-  if (!wasmMemory) return;
+  if (!gpuRenderer) return;
   cancelDeepZoom();
   rubber = null;
   rubberPointerId = null;
@@ -719,7 +547,7 @@ function resetToDefaultView() {
   view.halfW = DEFAULT_VIEW.halfW;
   invalidateCache();
   const ms = fullRenderAndCommit();
-  statusEl.textContent = `Reset · ${ms.toFixed(0)} ms`;
+  statusEl.textContent = `Reset · ${ms.toFixed(1)} ms`;
 }
 
 function drawRubberOverlay() {
@@ -727,63 +555,59 @@ function drawRubberOverlay() {
   const { x0, y0, x1, y1 } = rubber;
   const { left, top, S } = squareFromDrag(x0, y0, x1, y1);
   if (S < MIN_BOX_PX) return;
-  ctx.strokeStyle = "rgba(110, 181, 255, 0.95)";
-  ctx.lineWidth = 2;
-  ctx.setLineDash([6, 4]);
-  ctx.strokeRect(left + 0.5, top + 0.5, S - 1, S - 1);
-  ctx.setLineDash([]);
+  uiCtx.strokeStyle = "rgba(110, 181, 255, 0.95)";
+  uiCtx.lineWidth = 2;
+  uiCtx.setLineDash([6, 4]);
+  uiCtx.strokeRect(left + 0.5, top + 0.5, S - 1, S - 1);
+  uiCtx.setLineDash([]);
 }
 
-function frame(now) {
+function frame() {
+  syncStackPixelSize();
   const cw = canvas.width;
   const ch = canvas.height;
-
-  let wasmMs = 0;
+  let ms = 0;
 
   if (deepZoom) {
-    stepDeepZoom(now);
+    stepDeepZoom(performance.now());
+    uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
     drawRubberOverlay();
     requestAnimationFrame(frame);
     return;
   }
 
   const fp = buildFingerprint();
-  const dimsMatch = cacheCanvas.width === cw && cacheCanvas.height === ch;
-  const paramsMatch = cacheReady && cacheFingerprint === fp && dimsMatch;
-
-  if (!paramsMatch) {
-    wasmMs = fullRenderAndCommit();
-  } else if (!viewsEqual(view, committedView)) {
-    wasmMs = fullRenderAndCommit();
-  } else {
-    ctx.drawImage(cacheCanvas, 0, 0);
+  const paramsMatch = cacheReady && cacheFingerprint === fp;
+  if (!paramsMatch || !viewsEqual(view, committedView)) {
+    ms = fullRenderAndCommit();
   }
 
+  uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
   drawRubberOverlay();
 
-  statusEl.textContent = wasmMs > 0 ? `${cw}×${ch} · ${wasmMs.toFixed(0)} ms` : `${cw}×${ch}`;
+  statusEl.textContent = ms > 0 ? `${cw}×${ch} · ${ms.toFixed(1)} ms` : `${cw}×${ch}`;
 
   requestAnimationFrame(frame);
 }
 
-canvas.addEventListener("pointerdown", (e) => {
+uiCanvas.addEventListener("pointerdown", (e) => {
   if (e.button !== 0 || deepZoom) return;
-  canvas.setPointerCapture(e.pointerId);
+  uiCanvas.setPointerCapture(e.pointerId);
   rubberPointerId = e.pointerId;
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
   rubber = { x0: sx, y0: sy, x1: sx, y1: sy };
 });
 
-canvas.addEventListener("pointermove", (e) => {
+uiCanvas.addEventListener("pointermove", (e) => {
   if (rubber === null || e.pointerId !== rubberPointerId) return;
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
   rubber.x1 = sx;
   rubber.y1 = sy;
 });
 
-canvas.addEventListener("pointerup", (e) => {
+uiCanvas.addEventListener("pointerup", (e) => {
   if (rubber === null || e.pointerId !== rubberPointerId) return;
-  canvas.releasePointerCapture(e.pointerId);
+  uiCanvas.releasePointerCapture(e.pointerId);
   rubberPointerId = null;
 
   const { x0, y0, x1, y1 } = rubber;
@@ -801,7 +625,7 @@ canvas.addEventListener("pointerup", (e) => {
   fullRenderAndCommit();
 });
 
-canvas.addEventListener("pointercancel", (e) => {
+uiCanvas.addEventListener("pointercancel", (e) => {
   if (rubberPointerId === e.pointerId) {
     rubber = null;
     rubberPointerId = null;
@@ -859,26 +683,77 @@ maxIterInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") applyParamsBtn.click();
 });
 
-function ensureCanvasSize() {
-  if (canvas.width !== CANVAS || canvas.height !== CANVAS) {
-    canvas.width = CANVAS;
-    canvas.height = CANVAS;
-    freeBuffer();
+/**
+ * Match WebGPU + UI canvas backing store to the on-screen stack and DPR.
+ * Re-run after GPU context creation: getContext("webgpu") can reset #canvas dimensions,
+ * leaving it out of sync with #canvasUi and breaking box-zoom math.
+ */
+function syncStackPixelSize() {
+  const stack = canvas.parentElement;
+  if (!stack) return;
+  const rect = stack.getBoundingClientRect();
+  // Before layout, rect can be ~0; min*DPR would clamp to CANVAS_PX_MIN (256) and look broken.
+  if (rect.width < 32 || rect.height < 32) return;
+  const cssSide = Math.max(1, Math.min(rect.width, rect.height));
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const next = Math.round(
+    Math.min(CANVAS_PX_MAX, Math.max(CANVAS_PX_MIN, cssSide * dpr)),
+  );
+  if (
+    canvas.width !== next ||
+    canvas.height !== next ||
+    uiCanvas.width !== next ||
+    uiCanvas.height !== next
+  ) {
+    canvas.width = next;
+    canvas.height = next;
+    uiCanvas.width = next;
+    uiCanvas.height = next;
+    gpuRenderer?.resize(next, next);
     invalidateCache();
   }
 }
 
 async function main() {
-  ensureCanvasSize();
+  if (!webGpuSupported()) {
+    statusEl.textContent = "WebGPU is required (enable in browser / use Chromium).";
+    return;
+  }
+
   const wasm = await init();
   wasmMemory = wasm.memory;
   applyRenderParamsFromInputs();
   updateJuliaPanelVisibility();
   updateDeepZoomButtonLabel();
-  requestAnimationFrame(frame);
+
+  try {
+    gpuRenderer = await createFractalGpuRenderer(
+      canvas,
+      alloc,
+      dealloc,
+      fill_smooth_palette_lut,
+      wasmMemory,
+    );
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "WebGPU failed to initialize.";
+    return;
+  }
+
+  syncStackPixelSize();
+  const stack = canvas.parentElement;
+  if (stack && typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => syncStackPixelSize()).observe(stack);
+  }
+
+  // One frame lets layout settle so syncStackPixelSize sees a real .canvas-stack rect (not 256×256).
+  requestAnimationFrame(() => {
+    syncStackPixelSize();
+    requestAnimationFrame(frame);
+  });
 }
 
 main().catch((err) => {
-  statusEl.textContent = "WASM failed to load (see README).";
+  statusEl.textContent = "WASM failed to load.";
   console.error(err);
 });

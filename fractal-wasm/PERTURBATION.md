@@ -16,13 +16,19 @@ The reference \(Z_n\) is computed in extended precision (or double-double / arbi
 
 \(z \mapsto (|\Re z| + i|\Im z|)^2 + c\) is **not holomorphic** because of `abs`. A practical approach (used in some deep-zoom Ship renderers) is **piecewise linearization**: on each step the Jacobian depends on the quadrant signs of \(\Re z\) and \(\Im z\); perturbation uses the appropriate **real** linearization. Glitches can occur near **sign switches**—mitigations include smaller tiles, re-reference \(c_\mathrm{ref}\), or falling back to full precision for problematic pixels.
 
-## Suggested roadmap for `escape-time-fracta`
+## Implemented in this crate (Mandelbrot, f64)
 
-1. **Tile the image**: each tile has its own \(c_\mathrm{ref}\) (e.g. tile center) and max \(|\delta c|\) within the tile.
-2. **Reference orbit**: store `Vec<(Zr, Zi)>` for `n = 0..max_iter` at `c_ref` (may need `num-bigfloat` / `rug` in native tooling first; WASM may use a compact format or streaming).
-3. **Perturb pass**: for each pixel, \(\delta_0 = 0\), \(\delta c = c - c_\mathrm{ref}\), loop with the recurrence until escape or `n == ref_len`.
-4. **Re-reference** when \(|\delta_n|\) grows too large (Kalles-style “glitch detection”).
-5. Optional: **bilinear approximation** (series) for speed inside a tile.
+- **`src/perturb.rs`**: reference orbit at **view center** \(c_\mathrm{ref} =\) `(center_x, center_y)`, stored as `Z_0 … Z_{max_iter}` (`max_iter + 1` values). Per pixel: \(\delta_0 = 0\), \(\delta c = c - c_\mathrm{ref}\), then \(\delta_{n+1} = 2 Z_n \delta_n + \delta_n^2 + \delta c\) with the usual escape test on \(Z_n + \delta_n\).
+- **Glitch fallback**: if \(|\delta|^2\) is large relative to \(\max(1, |Z|^2)\), that pixel is recomputed with **direct** iteration (`escape_scalar_f64`).
+- **UI**: `perturb_mode` — **0** Off, **1** On (Mandelbrot when reference builds), **2** Auto when `half_w < PERTURB_AUTO_HALF_W` (0.02). If the reference escapes before `max_iter`, the whole frame uses the normal renderer.
+- **Precision**: both reference and \(\delta\) are **f64**; extreme zoom still wants a **high-precision** reference orbit later.
+
+## Roadmap
+
+1. **Tiles**: per-tile \(c_\mathrm{ref}\) so \(|\delta c|\) stays small on wide views.
+2. **High-precision `Z_n`** (double-double / arbitrary precision) with f64 \(\delta\).
+3. **Burning Ship** piecewise perturbation; **series approximation** for inner tiles.
+4. **GPU** — see `GPU.md`.
 
 ## References
 
@@ -31,4 +37,4 @@ The reference \(Z_n\) is computed in extended precision (or double-double / arbi
 - [Mandelbrot Metal — perturbation rendering](https://mandelbrot-metal.com/perturbation-rendering)  
 - [How perturbation theory and Taylor series make extreme fractal zooms possible (Medium)](https://medium.com/@michaelstebel/how-perturbation-theory-and-the-taylor-series-make-extreme-fractal-zooms-possible-2dfa9515b8cc)
 
-This crate does **not** implement perturbation yet; the `DEEP_ZOOM_HALF_W_MIN` guard in the web app is a pragmatic stop before f64 **\(c\)** resolution collapses relative to the viewport.
+The web app still uses `DEEP_ZOOM_HALF_W_MIN` as a pragmatic stop before **f64 \(c\)** spacing collapses relative to pixels; perturbation here does not yet extend precision beyond plain **f64** for the reference orbit.
