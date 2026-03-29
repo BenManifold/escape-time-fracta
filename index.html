@@ -19,34 +19,39 @@
       html,
       body {
         margin: 0;
-        height: 100%;
-        overflow: hidden;
+        min-height: 100%;
         background: var(--bg);
         font-family: system-ui, "Segoe UI", Roboto, sans-serif;
         color: var(--text);
       }
+      .layout {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: flex-start;
+        gap: 20px;
+        padding: 20px;
+      }
       #canvas {
         display: block;
-        width: 100vw;
-        height: 100vh;
-        cursor: grab;
-      }
-      #canvas:active {
-        cursor: grabbing;
+        width: 1000px;
+        height: 1000px;
+        max-width: calc(100vw - 40px);
+        max-height: calc(100vw - 40px);
+        aspect-ratio: 1;
+        cursor: crosshair;
+        touch-action: none;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
       }
       #hud {
-        position: fixed;
-        top: 12px;
-        left: 12px;
         padding: 12px 14px;
         border-radius: 10px;
         background: var(--panel);
         backdrop-filter: blur(8px);
-        max-width: min(320px, calc(100vw - 24px));
+        width: min(320px, 100%);
         font-size: 13px;
         line-height: 1.45;
         border: 1px solid rgba(255, 255, 255, 0.08);
-        pointer-events: auto;
       }
       #hud h1 {
         margin: 0 0 8px;
@@ -71,12 +76,24 @@
         font-size: 11px;
         color: var(--muted);
       }
-      #hud kbd {
-        font-family: ui-monospace, monospace;
-        font-size: 10px;
-        padding: 1px 4px;
-        border-radius: 4px;
-        background: rgba(255, 255, 255, 0.08);
+      #nextPreset {
+        margin-top: 10px;
+        width: 100%;
+        padding: 8px 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        background: rgba(110, 181, 255, 0.15);
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      #nextPreset:hover {
+        background: rgba(110, 181, 255, 0.25);
+      }
+      #nextPreset:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
       }
       #status {
         margin-top: 8px;
@@ -86,37 +103,39 @@
     </style>
   </head>
   <body>
-    <canvas id="canvas" aria-label="Fractal view"></canvas>
-    <div id="hud">
-      <h1>Escape-time fractals</h1>
-      <label>
-        Fractal
-        <select id="fractal" title="Fractal family">
-          <option value="0">Mandelbrot</option>
-          <option value="1">Julia</option>
-          <option value="2">Burning Ship</option>
-          <option value="3">Tricorn</option>
-        </select>
-      </label>
-      <label>
-        Max iterations <span id="iterLabel"></span>
-        <input id="maxIter" type="range" min="32" max="2048" step="32" value="512" />
-      </label>
-      <div id="juliaPanel" hidden>
+    <div class="layout">
+      <canvas id="canvas" width="1000" height="1000" aria-label="Fractal view"></canvas>
+      <div id="hud">
+        <h1>Escape-time fractals</h1>
         <label>
-          Julia Re <span id="juliaReLabel"></span>
-          <input id="juliaRe" type="range" min="-2000" max="2000" step="1" value="-727" />
+          Fractal
+          <select id="fractal" title="Fractal family">
+            <option value="0">Mandelbrot</option>
+            <option value="1">Julia</option>
+            <option value="2">Burning Ship</option>
+            <option value="3">Tricorn</option>
+          </select>
         </label>
         <label>
-          Julia Im <span id="juliaImLabel"></span>
-          <input id="juliaIm" type="range" min="-2000" max="2000" step="1" value="189" />
+          Max iterations <span id="iterLabel"></span>
+          <input id="maxIter" type="range" min="32" max="2048" step="32" value="512" />
         </label>
+        <div id="juliaPanel" hidden>
+          <label>
+            Julia Re <span id="juliaReLabel"></span>
+            <input id="juliaRe" type="range" min="-2000" max="2000" step="1" value="-727" />
+          </label>
+          <label>
+            Julia Im <span id="juliaImLabel"></span>
+            <input id="juliaIm" type="range" min="-2000" max="2000" step="1" value="189" />
+          </label>
+        </div>
+        <button type="button" id="nextPreset">Next preset</button>
+        <div class="hint">
+          Click and drag on the image to draw a square. The region inside becomes the next view (animated). Presets cycle classic locations per fractal.
+        </div>
+        <div id="status"></div>
       </div>
-      <div class="hint">
-        <kbd>Wheel</kbd> zoom · <kbd>Drag</kbd> pan · <kbd>Arrows</kbd> /
-        <kbd>WASD</kbd> · <kbd>+</kbd><kbd>-</kbd> zoom · <kbd>Shift</kbd> finer
-      </div>
-      <div id="status"></div>
     </div>
     <script type="module" src="./main.js"></script>
   </body>
