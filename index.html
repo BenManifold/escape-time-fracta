@@ -95,10 +95,65 @@
         flex: 1;
         min-width: 0;
       }
-      #hud .hint {
+      .hudHints {
         margin-top: 10px;
-        font-size: 11px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        font-size: 13px;
+        line-height: 1.35;
         color: var(--muted);
+      }
+      .hudHintsIconRow {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 14px 20px;
+      }
+      .hudHintCol {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        flex: 0 0 auto;
+        width: 4.75rem;
+      }
+      .hudHintIcon {
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        color: var(--muted);
+      }
+      .hudHintIcon svg {
+        display: block;
+      }
+      .hudZoomGlyphs {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        font-family: ui-monospace, "Cascadia Code", monospace;
+        font-weight: 600;
+        font-size: 16px;
+        line-height: 1;
+      }
+      .hudHintLabel {
+        font-size: inherit;
+        line-height: inherit;
+        text-align: center;
+        width: 100%;
+        text-wrap: balance;
+      }
+      .hudHintSub {
+        margin: 0;
+        padding-top: 2px;
+        font-size: inherit;
+        line-height: inherit;
+        text-align: center;
       }
       .hudBtn {
         margin-top: 10px;
@@ -128,6 +183,129 @@
       }
       #resetView:hover {
         background: rgba(255, 255, 255, 0.1);
+      }
+      .juliaModeRow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+        color: var(--muted);
+      }
+      .juliaModeRow .juliaModeLabel {
+        flex: 0 0 auto;
+        font-size: 13px;
+      }
+      .juliaModeSwitch {
+        display: flex;
+        flex: 1;
+        min-width: 0;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+      }
+      .juliaModeBtn {
+        flex: 1;
+        margin: 0;
+        padding: 7px 8px;
+        border: none;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background 0.12s ease, color 0.12s ease;
+      }
+      .juliaModeBtn:hover {
+        background: rgba(255, 255, 255, 0.09);
+        color: var(--text);
+      }
+      .juliaModeBtn.juliaModeBtnActive {
+        background: rgba(110, 181, 255, 0.22);
+        color: var(--accent);
+        box-shadow: inset 0 0 0 1px rgba(110, 181, 255, 0.25);
+      }
+      .juliaTourBar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 10px;
+        margin-top: 10px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid rgba(120, 220, 160, 0.28);
+        background: rgba(40, 90, 60, 0.12);
+      }
+      .juliaTourTransport {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .juliaTourIconBtn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: #d8f5e4;
+        cursor: pointer;
+        transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+      }
+      .juliaTourIconBtn:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.11);
+        color: #fff;
+      }
+      .juliaTourIconBtn:disabled {
+        opacity: 0.38;
+        cursor: not-allowed;
+      }
+      .juliaTourIconBtn svg {
+        display: block;
+      }
+      .juliaTourMiniLabel {
+        font-size: 11px;
+        color: var(--muted);
+        margin-right: 2px;
+      }
+      .juliaTourSpeedGroup,
+      .juliaTourDirGroup {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+      }
+      .juliaTourSpeedBtn,
+      .juliaTourDirBtn {
+        margin: 0;
+        padding: 5px 8px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+      }
+      .juliaTourSpeedBtn:hover,
+      .juliaTourDirBtn:hover {
+        background: rgba(255, 255, 255, 0.09);
+        color: var(--text);
+      }
+      .juliaTourSpeedBtn.juliaTourSpeedBtnActive {
+        background: rgba(110, 181, 255, 0.22);
+        color: var(--accent);
+        box-shadow: inset 0 0 0 1px rgba(110, 181, 255, 0.28);
+      }
+      .juliaTourDirBtn[aria-pressed="true"] {
+        background: rgba(255, 200, 120, 0.18);
+        color: #ffd9a8;
+        border-color: rgba(255, 200, 120, 0.35);
       }
       #status {
         margin-top: 8px;
@@ -183,26 +361,114 @@
           </select>
         </label>
         <div id="juliaPanel">
-          <label>
-            Canvas
-            <select id="juliaCanvasMode" title="Julia only: drag on the fractal view">
-              <option value="box">Box zoom (drag)</option>
-              <option value="lambda" selected>λ drag (hold &amp; move)</option>
-            </select>
-          </label>
+          <div class="juliaModeRow" role="group" aria-label="Julia canvas: box zoom or λ drag">
+            <span class="juliaModeLabel">Canvas</span>
+            <div class="juliaModeSwitch">
+              <button type="button" class="juliaModeBtn" id="juliaModeBox" aria-pressed="false" title="Drag a square region to zoom">
+                Box zoom
+              </button>
+              <button type="button" class="juliaModeBtn juliaModeBtnActive" id="juliaModeLambda" aria-pressed="true" title="Hold and move to adjust λ (Re ↔ X, Im ↔ Y)">
+                λ drag
+              </button>
+            </div>
+          </div>
           <label>
             Julia Re <span id="juliaReLabel"></span>
-            <input id="juliaRe" type="range" min="-20000" max="20000" step="1" value="-7269" />
+            <input
+              id="juliaRe"
+              type="number"
+              min="-2"
+              max="2"
+              step="any"
+              value="-0.7269"
+              title="λ Re in [−2, 2], full precision"
+            />
           </label>
           <label>
             Julia Im <span id="juliaImLabel"></span>
-            <input id="juliaIm" type="range" min="-20000" max="20000" step="1" value="1889" />
+            <input
+              id="juliaIm"
+              type="number"
+              min="-2"
+              max="2"
+              step="any"
+              value="0.1889"
+              title="λ Im in [−2, 2], full precision"
+            />
           </label>
+          <div class="juliaTourBar" role="group" aria-label="Julia lambda tour">
+            <div class="juliaTourTransport">
+              <button type="button" class="juliaTourIconBtn" id="juliaTourPlay" title="Play" aria-label="Play tour">
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                  <polygon points="2,1 13,7 2,13" fill="currentColor" />
+                </svg>
+              </button>
+              <button type="button" class="juliaTourIconBtn" id="juliaTourPause" title="Pause" aria-label="Pause tour">
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                  <rect x="2" y="2" width="3.5" height="10" fill="currentColor" />
+                  <rect x="8.5" y="2" width="3.5" height="10" fill="currentColor" />
+                </svg>
+              </button>
+            </div>
+            <div class="juliaTourSpeedGroup" role="group" aria-label="Tour speed">
+              <span class="juliaTourMiniLabel">Speed</span>
+              <button type="button" class="juliaTourSpeedBtn" data-speed="200" title="200× (fast)">200×</button>
+              <button type="button" class="juliaTourSpeedBtn" data-speed="100" title="100×">100×</button>
+              <button type="button" class="juliaTourSpeedBtn" data-speed="50" title="50×">50×</button>
+              <button type="button" class="juliaTourSpeedBtn" data-speed="10" title="10×">10×</button>
+              <button type="button" class="juliaTourSpeedBtn juliaTourSpeedBtnActive" data-speed="1" title="1× slowest (finest)">
+                1×
+              </button>
+            </div>
+            <div class="juliaTourDirGroup" role="group" aria-label="Reverse sweep direction per component">
+              <span class="juliaTourMiniLabel">λ dir</span>
+              <button type="button" class="juliaTourDirBtn" id="juliaTourDirRe" aria-pressed="false" title="Reverse real component">
+                Re
+              </button>
+              <button type="button" class="juliaTourDirBtn" id="juliaTourDirIm" aria-pressed="false" title="Reverse imaginary component">
+                Im
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="mandelPanel" hidden>
+          <div class="juliaModeRow" role="group" aria-label="Mandelbrot: box zoom or exponent drag">
+            <span class="juliaModeLabel">Canvas</span>
+            <div class="juliaModeSwitch">
+              <button type="button" class="juliaModeBtn juliaModeBtnActive" id="mandelModeBox" aria-pressed="true" title="Drag a square region to zoom">
+                Box zoom
+              </button>
+              <button type="button" class="juliaModeBtn" id="mandelModeExp" aria-pressed="false" title="Hold and drag horizontally to change multibrot exponent p (default 2)">
+                p drag
+              </button>
+            </div>
+          </div>
         </div>
         <button type="button" class="hudBtn" id="nextPreset">Next preset</button>
         <button type="button" class="hudBtn" id="resetView">Reset view</button>
-        <div class="hint">
-          WebGPU only: double-single pixel c and orbit (Julia λ included). Julia opens in λ-drag mode (hold &amp; move on the view: Re ↔ X, Im ↔ Y, 0.0001 per backing-store pixel; Shift → 0.001×); switch Canvas to box-zoom to drag a zoom region. Arrows/WASD pan; +/− zoom (hold). Julia sliders use a 0.0001 step. Max iter and palette update the image as you change them.
+        <div class="hudHints" aria-label="Keyboard and canvas">
+          <div class="hudHintsIconRow">
+            <div class="hudHintCol" title="Arrow keys or WASD (hold)">
+              <div class="hudHintIcon" aria-hidden="true">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+                  <path
+                    d="M12 3 L15 9 H9 Z M12 21 L9 15 H15 Z M3 12 L9 10 V14 Z M21 12 L15 10 V14 Z"
+                  />
+                </svg>
+              </div>
+              <span class="hudHintLabel">pan</span>
+            </div>
+            <div class="hudHintCol" title="+ / − keys (hold)">
+              <div class="hudHintIcon" aria-hidden="true">
+                <span class="hudZoomGlyphs">
+                  <span>+</span>
+                  <span>−</span>
+                </span>
+              </div>
+              <span class="hudHintLabel">zoom</span>
+            </div>
+          </div>
+          <p class="hudHintSub">shift + drag - fine adjustments</p>
         </div>
         <div id="status"></div>
       </div>

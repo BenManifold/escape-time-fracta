@@ -17,14 +17,31 @@ const KEYBOARD_HALF_W_MAX = 96;
 const MAX_ITER_MIN = 32;
 const MAX_ITER_MAX = 8192;
 
-/** Julia λ clamp (matches slider ±2). */
+/** Julia λ clamp (matches HUD ±2). */
 const JULIA_C_LIM = 2;
-/** Range inputs store λ·10⁴ so one step is 0.0001 (min/max ±20000 → λ in ±2). */
-const JULIA_SLIDER_SCALE = 10000;
 /** Julia “λ drag” mode: one backing-store pixel of motion changes λ by this much on that axis. */
 const JULIA_LAMBDA_PER_CANVAS_PX = 0.0001;
 /** With Shift held, scale the above by this factor (0.001× → finer strokes). */
 const JULIA_LAMBDA_SHIFT_MULT = 0.001;
+
+/**
+ * Julia λ tour: phase advance per animation frame (rad). Re/Im sweep [-JULIA_C_LIM, JULIA_C_LIM]
+ * via sin (zero slope at extrema ⇒ smooth rubber). Peak |Δλ|/frame ≈ JULIA_C_LIM * DPHASE (e.g. ~1e-7 when DPHASE=5e-8).
+ */
+const JULIA_TOUR_DPHASE_RAD = 5e-8;
+/** Im uses phase * this factor so Re/Im don’t stay locked in phase. */
+const JULIA_TOUR_IM_PHASE_MUL = 0.618033988749895;
+/** When |Re λ| and |Im λ| are both within this of 0, phase advances this many times faster. */
+const JULIA_TOUR_ORIGIN_HALF = 0.36
+const JULIA_TOUR_NEAR_ORIGIN_MULT = 150
+/** Upper bound for global φ scan on resync (Lissajous is quasi-periodic; wide span avoids wrong local minima). */
+const JULIA_TOUR_RESYNC_PHI_MAX = 3000 * Math.PI
+
+/** Mandelbrot multibrot z^p + c: Δp per backing-store pixel (horizontal drag). */
+const MANDEL_EXP_PER_CANVAS_PX = 0.006;
+const MANDEL_EXP_SHIFT_MULT = 0.1;
+const MANDEL_EXP_MIN = 1.25;
+const MANDEL_EXP_MAX = 16;
 
 const DEFAULT_VIEW = Object.freeze({
   centerX: -0.5,
@@ -44,7 +61,18 @@ const juliaReInput = document.getElementById("juliaRe");
 const juliaImInput = document.getElementById("juliaIm");
 const juliaReLabel = document.getElementById("juliaReLabel");
 const juliaImLabel = document.getElementById("juliaImLabel");
-const juliaCanvasModeSelect = document.getElementById("juliaCanvasMode");
+const juliaModeBoxBtn = document.getElementById("juliaModeBox");
+const juliaModeLambdaBtn = document.getElementById("juliaModeLambda");
+const juliaTourPlayBtn = document.getElementById("juliaTourPlay");
+const juliaTourPauseBtn = document.getElementById("juliaTourPause");
+const juliaTourDirReBtn = document.getElementById("juliaTourDirRe");
+const juliaTourDirImBtn = document.getElementById("juliaTourDirIm");
+const juliaTourSpeedBtns = /** @type {NodeListOf<HTMLButtonElement>} */ (
+  document.querySelectorAll(".juliaTourSpeedBtn")
+);
+const mandelPanel = document.getElementById("mandelPanel");
+const mandelModeBoxBtn = document.getElementById("mandelModeBox");
+const mandelModeExpBtn = document.getElementById("mandelModeExp");
 const nextPresetBtn = document.getElementById("nextPreset");
 const resetViewBtn = document.getElementById("resetView");
 const paletteSelect = document.getElementById("palette");
@@ -126,8 +154,36 @@ let cacheReady = false;
 let rubber = null;
 let rubberPointerId = null;
 
-/** @type {{ pointerId: number; lastSx: number; lastSy: number } | null} */
+/**
+ * @type {{ pointerId: number; lastSx: number; lastSy: number; resumeTourAfter: boolean } | null}
+ */
 let juliaLambdaDrag = null;
+
+/** True while writing Julia slider DOM from code (avoids `input` handlers stopping a paused λ tour). */
+let syncingJuliaInputsFromState = false;
+
+/** @type {"box" | "lambda"} */
+let juliaCanvasMode = "lambda";
+
+/** @type {"box" | "exp"} */
+let mandelCanvasMode = "box";
+
+/** Multibrot exponent p (Mandelbrot only; default 2). */
+let mandelExponent = 2;
+
+/** @type {{ pointerId: number; lastSx: number; lastSy: number } | null} */
+let mandelExpDrag = null;
+
+/**
+ * Slow λ tour: phase-driven sin sweeps on Re/Im within [reMin,reMax]×[imMin,imMax].
+ * @type {{ phase: number; reMin: number; reMax: number; imMin: number; imMax: number; paused: boolean; speedMult: number; dirRe: number; dirIm: number } | null}
+ */
+let juliaLambdaTour = null;
+
+/** Speed when starting a tour (1× = slowest baseline). */
+let juliaTourSpeedMult = 1;
+let juliaTourDirRe = 1;
+let juliaTourDirIm = 1;
 
 /** Held keys for smooth pan (arrows / WASD) and zoom (+/−). */
 const keysPanZoom = {
@@ -276,24 +332,34 @@ function syncIterLabel() {
 }
 
 function previewJuliaLabelsFromInputs() {
-  const re = Number(juliaReInput.value) / JULIA_SLIDER_SCALE;
-  const im = Number(juliaImInput.value) / JULIA_SLIDER_SCALE;
-  juliaReLabel.textContent = Number.isFinite(re) ? re.toFixed(4) : "—";
-  juliaImLabel.textContent = Number.isFinite(im) ? im.toFixed(4) : "—";
+  const re = clampJuliaComponent(Number(juliaReInput.value));
+  const im = clampJuliaComponent(Number(juliaImInput.value));
+  juliaReLabel.textContent = Number.isFinite(re) ? re.toFixed(6) : "—";
+  juliaImLabel.textContent = Number.isFinite(im) ? im.toFixed(6) : "—";
 }
 
-/** Snap `julia` to slider grid and refresh range + labels (after λ-drag or programmatic edits). */
+/** String for Julia number fields: full float in [-2,2], no artificial grid. */
+function formatJuliaFieldValue(v) {
+  if (!Number.isFinite(v)) return "0";
+  v = clampJuliaComponent(v);
+  const x = parseFloat(v.toFixed(12));
+  if (!Number.isFinite(x) || x === 0) return "0";
+  return String(x);
+}
+
+/** Clamp `julia`, write HUD fields + labels (after λ-drag or programmatic edits). */
 function syncJuliaHudFromJuliaState() {
   julia.re = clampJuliaComponent(julia.re);
   julia.im = clampJuliaComponent(julia.im);
-  const rInt = Math.min(20000, Math.max(-20000, Math.round(julia.re * JULIA_SLIDER_SCALE)));
-  const iInt = Math.min(20000, Math.max(-20000, Math.round(julia.im * JULIA_SLIDER_SCALE)));
-  julia.re = rInt / JULIA_SLIDER_SCALE;
-  julia.im = iInt / JULIA_SLIDER_SCALE;
-  juliaReInput.value = String(rInt);
-  juliaImInput.value = String(iInt);
-  juliaReLabel.textContent = julia.re.toFixed(4);
-  juliaImLabel.textContent = julia.im.toFixed(4);
+  syncingJuliaInputsFromState = true;
+  try {
+    juliaReInput.value = formatJuliaFieldValue(julia.re);
+    juliaImInput.value = formatJuliaFieldValue(julia.im);
+  } finally {
+    syncingJuliaInputsFromState = false;
+  }
+  juliaReLabel.textContent = julia.re.toFixed(6);
+  juliaImLabel.textContent = julia.im.toFixed(6);
 }
 
 function clearCanvasPointerInteraction() {
@@ -302,16 +368,234 @@ function clearCanvasPointerInteraction() {
   juliaLambdaDrag = null;
 }
 
+function setJuliaCanvasMode(mode) {
+  if (mode !== "box" && mode !== "lambda") return;
+  juliaCanvasMode = mode;
+  const isBox = mode === "box";
+  juliaModeBoxBtn?.classList.toggle("juliaModeBtnActive", isBox);
+  juliaModeLambdaBtn?.classList.toggle("juliaModeBtnActive", !isBox);
+  juliaModeBoxBtn?.setAttribute("aria-pressed", isBox ? "true" : "false");
+  juliaModeLambdaBtn?.setAttribute("aria-pressed", isBox ? "false" : "true");
+}
+
 function juliaCanvasModeIsLambdaDrag() {
-  return juliaCanvasModeSelect?.value === "lambda";
+  return juliaCanvasMode === "lambda";
+}
+
+function clampMandelExponent(p) {
+  if (!Number.isFinite(p)) return 2;
+  return Math.min(MANDEL_EXP_MAX, Math.max(MANDEL_EXP_MIN, p));
+}
+
+function setMandelCanvasMode(mode) {
+  if (mode !== "box" && mode !== "exp") return;
+  mandelCanvasMode = mode;
+  const isBox = mode === "box";
+  mandelModeBoxBtn?.classList.toggle("juliaModeBtnActive", isBox);
+  mandelModeExpBtn?.classList.toggle("juliaModeBtnActive", !isBox);
+  mandelModeBoxBtn?.setAttribute("aria-pressed", isBox ? "true" : "false");
+  mandelModeExpBtn?.setAttribute("aria-pressed", isBox ? "false" : "true");
+}
+
+function mandelCanvasModeIsExpDrag() {
+  return mandelCanvasMode === "exp";
+}
+
+function updateJuliaTourControlsUI() {
+  const playing = !!(juliaLambdaTour && !juliaLambdaTour.paused);
+  const hasTour = !!juliaLambdaTour;
+
+  if (juliaTourPlayBtn) {
+    juliaTourPlayBtn.disabled = playing;
+  }
+  if (juliaTourPauseBtn) {
+    juliaTourPauseBtn.disabled = !hasTour || !!juliaLambdaTour?.paused;
+  }
+
+  const speedActive = juliaLambdaTour?.speedMult ?? juliaTourSpeedMult;
+  juliaTourSpeedBtns.forEach((btn) => {
+    const v = Number(btn.getAttribute("data-speed"));
+    btn.classList.toggle("juliaTourSpeedBtnActive", v === speedActive);
+  });
+
+  const dr = juliaLambdaTour?.dirRe ?? juliaTourDirRe;
+  const di = juliaLambdaTour?.dirIm ?? juliaTourDirIm;
+  juliaTourDirReBtn?.setAttribute("aria-pressed", dr < 0 ? "true" : "false");
+  juliaTourDirImBtn?.setAttribute("aria-pressed", di < 0 ? "true" : "false");
+}
+
+function stopJuliaLambdaTour() {
+  if (!juliaLambdaTour) return;
+  juliaLambdaTour = null;
+  syncJuliaHudFromJuliaState();
+  updateJuliaTourControlsUI();
+}
+
+/**
+ * Start or resume the tour from the **current** λ (only internal `phase` is adjusted; `julia` unchanged).
+ */
+function playJuliaLambdaTourFromUi() {
+  if (fractalKind !== 1) return;
+  if (juliaLambdaTour) {
+    if (juliaLambdaTour.paused) {
+      resyncTourPhaseFromJulia();
+      juliaLambdaTour.paused = false;
+    }
+  } else {
+    const w = JULIA_C_LIM;
+    juliaLambdaTour = {
+      phase: 0,
+      reMin: -w,
+      reMax: w,
+      imMin: -w,
+      imMax: w,
+      paused: false,
+      speedMult: juliaTourSpeedMult,
+      dirRe: juliaTourDirRe,
+      dirIm: juliaTourDirIm,
+    };
+    resyncTourPhaseFromJulia();
+  }
+  updateJuliaTourControlsUI();
+  invalidateCache();
+}
+
+function pauseJuliaLambdaTourFromUi() {
+  if (!juliaLambdaTour || juliaLambdaTour.paused) return;
+  juliaLambdaTour.paused = true;
+  updateJuliaTourControlsUI();
+}
+
+function setJuliaTourSpeedMult(mult) {
+  if (!Number.isFinite(mult) || mult <= 0) return;
+  juliaTourSpeedMult = mult;
+  if (juliaLambdaTour) {
+    juliaLambdaTour.speedMult = mult;
+    resyncTourPhaseFromJulia();
+    invalidateCache();
+  }
+  updateJuliaTourControlsUI();
+}
+
+function toggleJuliaTourDirRe() {
+  juliaTourDirRe *= -1;
+  if (juliaLambdaTour) {
+    juliaLambdaTour.dirRe *= -1;
+    resyncTourPhaseFromJulia();
+    invalidateCache();
+  }
+  updateJuliaTourControlsUI();
+}
+
+function toggleJuliaTourDirIm() {
+  juliaTourDirIm *= -1;
+  if (juliaLambdaTour) {
+    juliaLambdaTour.dirIm *= -1;
+    resyncTourPhaseFromJulia();
+    invalidateCache();
+  }
+  updateJuliaTourControlsUI();
+}
+
+function juliaLambdaTourDPhase() {
+  if (!juliaLambdaTour) return 0;
+  const nearOrigin =
+    Math.abs(julia.re) <= JULIA_TOUR_ORIGIN_HALF && Math.abs(julia.im) <= JULIA_TOUR_ORIGIN_HALF;
+  const base =
+    JULIA_TOUR_DPHASE_RAD * (nearOrigin ? JULIA_TOUR_NEAR_ORIGIN_MULT : 1) * juliaLambdaTour.speedMult;
+  return base;
+}
+
+/** @param {number} phi @param {{ reMin: number; reMax: number; imMin: number; imMax: number; dirRe?: number; dirIm?: number }} t */
+function tourLambdaAtPhase(phi, t) {
+  const halfRe = 0.5 * (t.reMax - t.reMin);
+  const midRe = 0.5 * (t.reMax + t.reMin);
+  const halfIm = 0.5 * (t.imMax - t.imMin);
+  const midIm = 0.5 * (t.imMax + t.imMin);
+  const dirRe = t.dirRe ?? 1;
+  const dirIm = t.dirIm ?? 1;
+  return {
+    re: clampJuliaComponent(midRe + dirRe * halfRe * Math.sin(phi)),
+    im: clampJuliaComponent(midIm + dirIm * halfIm * Math.sin(phi * JULIA_TOUR_IM_PHASE_MUL)),
+  };
+}
+
+/**
+ * Set internal phase so the *next* tick (phase += dPhase) lands on the curve point closest to
+ * current λ. Global coarse scan + local refine so resume after drag does not pick a wrong
+ * local minimum when `phase` is large.
+ */
+function resyncTourPhaseFromJulia() {
+  if (!juliaLambdaTour) return;
+  const t = juliaLambdaTour;
+  const tr = clampJuliaComponent(julia.re);
+  const ti = clampJuliaComponent(julia.im);
+  const dPhase = juliaLambdaTourDPhase();
+
+  function errAtPhi(phi) {
+    const raw = tourLambdaAtPhase(phi, t);
+    return (raw.re - tr) ** 2 + (raw.im - ti) ** 2;
+  }
+
+  let bestPhi = t.phase;
+  let bestErr = errAtPhi(t.phase);
+
+  const phiMax = JULIA_TOUR_RESYNC_PHI_MAX;
+  const coarseN = 14000;
+  for (let i = 0; i <= coarseN; i++) {
+    const phi = (phiMax * i) / coarseN;
+    const err = errAtPhi(phi);
+    if (err < bestErr) {
+      bestErr = err;
+      bestPhi = phi;
+    }
+  }
+
+  const refineSpan = 2 * Math.PI;
+  const fineN = 2400;
+  for (let pass = 0; pass < 2; pass++) {
+    for (let j = 0; j <= fineN; j++) {
+      const phi = bestPhi - refineSpan + (2 * refineSpan * j) / fineN;
+      const err = errAtPhi(phi);
+      if (err < bestErr) {
+        bestErr = err;
+        bestPhi = phi;
+      }
+    }
+  }
+
+  t.phase = bestPhi - dPhase;
+}
+
+function resumeJuliaLambdaTourAfterLambdaDrag() {
+  if (!juliaLambdaTour?.paused) return;
+  juliaLambdaTour.paused = false;
+  syncJuliaHudFromJuliaState();
+  resyncTourPhaseFromJulia();
+  updateJuliaTourControlsUI();
+  invalidateCache();
+}
+
+/** Advance tour: sin maps phase → [-1,1] with zero derivative at ends (smooth rubber). */
+function tickJuliaLambdaTour() {
+  if (!juliaLambdaTour || fractalKind !== 1) return;
+  const t = juliaLambdaTour;
+  if (t.paused) return;
+  t.phase += juliaLambdaTourDPhase();
+  const { re, im } = tourLambdaAtPhase(t.phase, t);
+  julia.re = re;
+  julia.im = im;
+  juliaReLabel.textContent = julia.re.toFixed(6);
+  juliaImLabel.textContent = julia.im.toFixed(6);
+  invalidateCache();
 }
 
 function applyRenderParamsFromInputs() {
   maxIterUser = readMaxIterFromInput();
   maxIterInput.value = String(maxIterUser);
   syncIterLabel();
-  julia.re = clampJuliaComponent(Number(juliaReInput.value) / JULIA_SLIDER_SCALE);
-  julia.im = clampJuliaComponent(Number(juliaImInput.value) / JULIA_SLIDER_SCALE);
+  julia.re = clampJuliaComponent(Number(juliaReInput.value));
+  julia.im = clampJuliaComponent(Number(juliaImInput.value));
   if (!Number.isFinite(julia.re)) julia.re = 0;
   if (!Number.isFinite(julia.im)) julia.im = 0;
   previewJuliaLabelsFromInputs();
@@ -323,15 +607,19 @@ function syncParamsFromInputs() {
   invalidateCache();
 }
 
-function updateJuliaPanelVisibility() {
+function updateFractalPanelsVisibility() {
   juliaPanel.hidden = fractalKind !== 1;
+  if (mandelPanel) {
+    mandelPanel.hidden = fractalKind !== 0;
+  }
 }
 
 function buildFingerprint() {
   const cw = canvas.width;
   const ch = canvas.height;
   const jKey = fractalKind === 1 ? `|${julia.re}|${julia.im}` : "";
-  return `${cw}x${ch}|${fractalKind}|${maxIterUser}${jKey}|p${currentPaletteId()}`;
+  const pKey = fractalKind === 0 ? `|exp${mandelExponent}` : "";
+  return `${cw}x${ch}|${fractalKind}|${maxIterUser}${jKey}${pKey}|p${currentPaletteId()}`;
 }
 
 function viewsEqual(a, b) {
@@ -360,6 +648,7 @@ function gpuParams(over = {}) {
     fractalKind: fractalKind >>> 0,
     juliaRe: julia.re,
     juliaIm: julia.im,
+    mandelExponent: fractalKind === 0 ? mandelExponent : 2,
   };
 }
 
@@ -423,11 +712,15 @@ function viewFromSquare(left, top, S) {
 
 function resetToDefaultView() {
   if (!gpuRenderer) return;
+  stopJuliaLambdaTour();
   clearCanvasPointerInteraction();
   const d = defaultViewForFractalKind(fractalKind);
   view.centerX = d.centerX;
   view.centerY = d.centerY;
   view.halfW = d.halfW;
+  if (fractalKind === 0) {
+    mandelExponent = 2;
+  }
   invalidateCache();
   const ms = fullRenderAndCommit();
   statusEl.textContent = `Reset · ${ms.toFixed(1)} ms`;
@@ -493,8 +786,12 @@ function fractalEquationOverlayLines() {
         "Burning Ship",
         "z' = (|Re z| + i|Im z|)^2 + c,  z0 = 0,  c = pixel",
       ];
-    default:
-      return ["Mandelbrot", "z' = z^2 + c,  z0 = 0,  c = pixel"];
+    default: {
+      const p = mandelExponent;
+      const pStr = Math.abs(p - Math.round(p)) < 1e-4 ? String(Math.round(p)) : p.toFixed(3);
+      const title = Math.abs(p - 2) < 1e-5 ? "Mandelbrot" : "Mandelbrot (multibrot)";
+      return [title, `z' = z^${pStr} + c,  z0 = 0,  c = pixel`];
+    }
   }
 }
 
@@ -544,6 +841,10 @@ function frame() {
 
   applyKeyboardPanZoom(dtSec);
 
+  if (juliaLambdaTour && fractalKind === 1) {
+    tickJuliaLambdaTour();
+  }
+
   const fp = buildFingerprint();
   const paramsMatch = cacheReady && cacheFingerprint === fp;
   if (!paramsMatch || !viewsEqual(view, committedView)) {
@@ -555,8 +856,16 @@ function frame() {
   drawRubberOverlay();
 
   const tag = gpuRenderer?.usedGpuPerturb ? " · GPU perturb" : "";
+  const tourTag =
+    juliaLambdaTour && fractalKind === 1
+      ? juliaLambdaTour.paused
+        ? " · λ tour (paused)"
+        : " · λ tour"
+      : "";
   statusEl.textContent =
-    ms > 0 ? `${cw}×${ch}${tag} · ${ms.toFixed(1)} ms` : `${cw}×${ch}${tag}`;
+    ms > 0
+      ? `${cw}×${ch}${tag} · ${ms.toFixed(1)} ms${tourTag}`
+      : `${cw}×${ch}${tag}${tourTag}`;
 
   requestAnimationFrame(frame);
 }
@@ -568,10 +877,23 @@ uiCanvas.addEventListener("pointerdown", (e) => {
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
   if (fractalKind === 1 && juliaCanvasModeIsLambdaDrag()) {
     rubber = null;
-    juliaLambdaDrag = { pointerId: e.pointerId, lastSx: sx, lastSy: sy };
+    let resumeTourAfter = false;
+    if (juliaLambdaTour) {
+      resumeTourAfter = !juliaLambdaTour.paused;
+      juliaLambdaTour.paused = true;
+      updateJuliaTourControlsUI();
+    }
+    juliaLambdaDrag = { pointerId: e.pointerId, lastSx: sx, lastSy: sy, resumeTourAfter };
+    return;
+  }
+  if (fractalKind === 0 && mandelCanvasModeIsExpDrag()) {
+    rubber = null;
+    juliaLambdaDrag = null;
+    mandelExpDrag = { pointerId: e.pointerId, lastSx: sx, lastSy: sy };
     return;
   }
   juliaLambdaDrag = null;
+  mandelExpDrag = null;
   rubber = { x0: sx, y0: sy, x1: sx, y1: sy };
 });
 
@@ -591,6 +913,15 @@ uiCanvas.addEventListener("pointermove", (e) => {
     invalidateCache();
     return;
   }
+  if (mandelExpDrag) {
+    const dx = sx - mandelExpDrag.lastSx;
+    const mult = e.shiftKey ? MANDEL_EXP_SHIFT_MULT : 1;
+    mandelExponent = clampMandelExponent(mandelExponent + dx * MANDEL_EXP_PER_CANVAS_PX * mult);
+    mandelExpDrag.lastSx = sx;
+    mandelExpDrag.lastSy = sy;
+    invalidateCache();
+    return;
+  }
   if (rubber === null) return;
   rubber.x1 = sx;
   rubber.y1 = sy;
@@ -602,7 +933,16 @@ uiCanvas.addEventListener("pointerup", (e) => {
   rubberPointerId = null;
 
   if (juliaLambdaDrag) {
+    const resumeTour = juliaLambdaDrag.resumeTourAfter;
     juliaLambdaDrag = null;
+    if (resumeTour) {
+      resumeJuliaLambdaTourAfterLambdaDrag();
+    }
+    return;
+  }
+
+  if (mandelExpDrag) {
+    mandelExpDrag = null;
     return;
   }
 
@@ -628,7 +968,12 @@ uiCanvas.addEventListener("pointercancel", (e) => {
   } catch {
     /* already released */
   }
+  const resumeTour = juliaLambdaDrag?.resumeTourAfter;
+  const hadJuliaLambdaDrag = !!juliaLambdaDrag;
   clearCanvasPointerInteraction();
+  if (hadJuliaLambdaDrag && resumeTour) {
+    resumeJuliaLambdaTourAfterLambdaDrag();
+  }
 });
 
 resetViewBtn.addEventListener("click", () => {
@@ -644,6 +989,12 @@ nextPresetBtn.addEventListener("click", () => {
   view.centerX = toView.centerX;
   view.centerY = toView.centerY;
   view.halfW = toView.halfW;
+  if (fractalKind === 0) {
+    mandelExponent = 2;
+  }
+  if (fractalKind === 1) {
+    stopJuliaLambdaTour();
+  }
   fullRenderAndCommit();
 });
 
@@ -652,8 +1003,10 @@ fractalSelect.addEventListener("change", () => {
   if (fk === 3 || !Number.isFinite(fk)) fk = 0;
   fractalSelect.value = String(fk);
   fractalKind = fk;
+  mandelExponent = 2;
+  stopJuliaLambdaTour();
   clearCanvasPointerInteraction();
-  updateJuliaPanelVisibility();
+  updateFractalPanelsVisibility();
   syncParamsFromInputs();
 });
 
@@ -662,12 +1015,45 @@ paletteSelect.addEventListener("change", () => {
 });
 
 juliaReInput.addEventListener("input", () => {
+  if (syncingJuliaInputsFromState) return;
+  stopJuliaLambdaTour();
   syncParamsFromInputs();
 });
 
 juliaImInput.addEventListener("input", () => {
+  if (syncingJuliaInputsFromState) return;
+  stopJuliaLambdaTour();
   syncParamsFromInputs();
 });
+
+juliaModeBoxBtn?.addEventListener("click", () => setJuliaCanvasMode("box"));
+juliaModeLambdaBtn?.addEventListener("click", () => setJuliaCanvasMode("lambda"));
+
+juliaTourPlayBtn?.addEventListener("click", () => {
+  playJuliaLambdaTourFromUi();
+});
+
+juliaTourPauseBtn?.addEventListener("click", () => {
+  pauseJuliaLambdaTourFromUi();
+});
+
+juliaTourDirReBtn?.addEventListener("click", () => {
+  toggleJuliaTourDirRe();
+});
+
+juliaTourDirImBtn?.addEventListener("click", () => {
+  toggleJuliaTourDirIm();
+});
+
+juliaTourSpeedBtns.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const v = Number(btn.getAttribute("data-speed"));
+    setJuliaTourSpeedMult(v);
+  });
+});
+
+mandelModeBoxBtn?.addEventListener("click", () => setMandelCanvasMode("box"));
+mandelModeExpBtn?.addEventListener("click", () => setMandelCanvasMode("exp"));
 
 maxIterInput.addEventListener("input", () => {
   syncParamsFromInputs();
@@ -749,7 +1135,10 @@ async function main() {
   const wasm = await init();
   wasmMemory = wasm.memory;
   applyRenderParamsFromInputs();
-  updateJuliaPanelVisibility();
+  updateFractalPanelsVisibility();
+  setJuliaCanvasMode("lambda");
+  setMandelCanvasMode("box");
+  updateJuliaTourControlsUI();
 
   try {
     gpuRenderer = await createFractalGpuRenderer(

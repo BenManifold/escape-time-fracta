@@ -104,10 +104,35 @@ fn cplx_add_ds(
   return vec4<f32>(r.x, r.y, i.x, i.y);
 }
 
+/// Multibrot z^p + c: magnitude/phase in f32, then split and add c in double-single.
+fn cplx_pow_f32_add_ds(
+  zr: f32,
+  zi: f32,
+  p: f32,
+  crh: f32,
+  crl: f32,
+  cih: f32,
+  cil: f32,
+) -> vec4<f32> {
+  let r = sqrt(zr * zr + zi * zi);
+  if (r < 1e-30) {
+    return cplx_add_ds(0.0, 0.0, 0.0, 0.0, crh, crl, cih, cil);
+  }
+  let phi = atan2(zi, zr);
+  let rp = pow(r, p);
+  let nph = p * phi;
+  let pr = rp * cos(nph);
+  let pi = rp * sin(nph);
+  let pr_s = split_f32(pr);
+  let pi_s = split_f32(pi);
+  return cplx_add_ds(pr_s.x, pr_s.y, pi_s.x, pi_s.y, crh, crl, cih, cil);
+}
+
 fn step_escape_ds(
   zrh: f32, zrl: f32, zih: f32, zil: f32,
   crh: f32, crl: f32, cih: f32, cil: f32,
   fk: u32,
+  mandel_exp: f32,
 ) -> vec4<f32> {
   var ar = zrh;
   var arl = zrl;
@@ -120,9 +145,20 @@ fn step_escape_ds(
     arl = ax.y;
     ai = ay.x;
     ail = ay.y;
+    let sq = cplx_sqr_ds(ar, arl, ai, ail);
+    return cplx_add_ds(sq.x, sq.y, sq.z, sq.w, crh, crl, cih, cil);
   }
-  let sq = cplx_sqr_ds(ar, arl, ai, ail);
-  return cplx_add_ds(sq.x, sq.y, sq.z, sq.w, crh, crl, cih, cil);
+  if (fk == 1u) {
+    let sq = cplx_sqr_ds(ar, arl, ai, ail);
+    return cplx_add_ds(sq.x, sq.y, sq.z, sq.w, crh, crl, cih, cil);
+  }
+  if (abs(mandel_exp - 2.0) < 0.00005) {
+    let sq = cplx_sqr_ds(ar, arl, ai, ail);
+    return cplx_add_ds(sq.x, sq.y, sq.z, sq.w, crh, crl, cih, cil);
+  }
+  let zr = ar + arl;
+  let zi = ai + ail;
+  return cplx_pow_f32_add_ds(zr, zi, mandel_exp, crh, crl, cih, cil);
 }
 `;
 
@@ -214,6 +250,7 @@ fn escape_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
   let palette_id = u.iter_pal_wh.y;
   let t_max = max(u.tm.x, 1.0);
   let fk = u32(u.kind_j.x + 0.5);
+  let mandel_exp = u.kind_j.y;
 
   let off_re = mul_u32_ds(gid.x, u.c_step.x, u.c_step.y);
   let re_ds = ds_add(u.c_base.x, u.c_base.y, off_re.x, off_re.y);
@@ -264,7 +301,7 @@ fn escape_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
       textureStore(outImg, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(c.r, c.g, c.b, 1.0));
       return;
     }
-    let nz = step_escape_ds(zrh, zrl, zih, zil, crh, crl, cih, cil, fk);
+    let nz = step_escape_ds(zrh, zrl, zih, zil, crh, crl, cih, cil, fk, mandel_exp);
     zrh = nz.x;
     zrl = nz.y;
     zih = nz.z;
@@ -559,7 +596,9 @@ export async function createFractalGpuRenderer(canvas, alloc, dealloc, fillLut, 
 
     new Float32Array(paramScratch, 0, 4).set([cx, cy, halfW, aspect]);
     new Uint32Array(paramScratch, 16, 4).set([maxIter, p.paletteId >>> 0, nw, nh]);
-    new Float32Array(paramScratch, 32, 4).set([p.fractalKind >>> 0, 0, 0, 0]);
+    const mandelExp =
+      typeof p.mandelExponent === "number" && Number.isFinite(p.mandelExponent) ? p.mandelExponent : 2;
+    new Float32Array(paramScratch, 32, 4).set([p.fractalKind >>> 0, mandelExp, 0, 0]);
     new Float32Array(paramScratch, 48, 4).set([tMax, 0, 0, 0]);
     new Float32Array(paramScratch, 64, 4).set([jrH, jrL, jiH, jiL]);
     new Float32Array(paramScratch, 80, 4).set([oRh, oRl, oIh, oIl]);
