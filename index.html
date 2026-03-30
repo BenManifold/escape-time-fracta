@@ -164,7 +164,7 @@
           Fractal
           <select id="fractal" title="Fractal family">
             <option value="0">Mandelbrot</option>
-            <option value="1">Julia</option>
+            <option value="1" selected>Julia</option>
             <option value="2">Burning Ship</option>
           </select>
         </label>
@@ -182,7 +182,14 @@
             <option value="4">Ghost ship</option>
           </select>
         </label>
-        <div id="juliaPanel" hidden>
+        <div id="juliaPanel">
+          <label>
+            Canvas
+            <select id="juliaCanvasMode" title="Julia only: drag on the fractal view">
+              <option value="box">Box zoom (drag)</option>
+              <option value="lambda" selected>λ drag (hold &amp; move)</option>
+            </select>
+          </label>
           <label>
             Julia Re <span id="juliaReLabel"></span>
             <input id="juliaRe" type="range" min="-20000" max="20000" step="1" value="-7269" />
@@ -195,7 +202,7 @@
         <button type="button" class="hudBtn" id="nextPreset">Next preset</button>
         <button type="button" class="hudBtn" id="resetView">Reset view</button>
         <div class="hint">
-          WebGPU only: double-single pixel c and orbit (Julia λ included). Drag to box-zoom; arrows/WASD pan; +/− zoom (hold). Julia λ sliders step by 0.0001; max iter and palette update the image as you change them.
+          WebGPU only: double-single pixel c and orbit (Julia λ included). Julia opens in λ-drag mode (hold &amp; move on the view: Re ↔ X, Im ↔ Y, 0.0001 per backing-store pixel; Shift → 0.001×); switch Canvas to box-zoom to drag a zoom region. Arrows/WASD pan; +/− zoom (hold). Julia sliders use a 0.0001 step. Max iter and palette update the image as you change them.
         </div>
         <div id="status"></div>
       </div>

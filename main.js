@@ -21,6 +21,10 @@ const MAX_ITER_MAX = 8192;
 const JULIA_C_LIM = 2;
 /** Range inputs store λ·10⁴ so one step is 0.0001 (min/max ±20000 → λ in ±2). */
 const JULIA_SLIDER_SCALE = 10000;
+/** Julia “λ drag” mode: one backing-store pixel of motion changes λ by this much on that axis. */
+const JULIA_LAMBDA_PER_CANVAS_PX = 0.0001;
+/** With Shift held, scale the above by this factor (0.001× → finer strokes). */
+const JULIA_LAMBDA_SHIFT_MULT = 0.001;
 
 const DEFAULT_VIEW = Object.freeze({
   centerX: -0.5,
@@ -40,6 +44,7 @@ const juliaReInput = document.getElementById("juliaRe");
 const juliaImInput = document.getElementById("juliaIm");
 const juliaReLabel = document.getElementById("juliaReLabel");
 const juliaImLabel = document.getElementById("juliaImLabel");
+const juliaCanvasModeSelect = document.getElementById("juliaCanvasMode");
 const nextPresetBtn = document.getElementById("nextPreset");
 const resetViewBtn = document.getElementById("resetView");
 const paletteSelect = document.getElementById("palette");
@@ -75,6 +80,13 @@ const PRESETS = [
 
 const presetRound = { 0: 0, 1: 0, 2: 0, 3: 0 };
 
+/** Initial camera when picking Reset view (per fractal family). */
+function defaultViewForFractalKind(fk) {
+  if (fk === 1) return PRESETS[1][0];
+  if (fk === 2) return PRESETS[2][0];
+  return DEFAULT_VIEW;
+}
+
 let wasmMemory;
 
 /**
@@ -87,9 +99,9 @@ let wasmMemory;
 let gpuRenderer = null;
 
 const view = {
-  centerX: DEFAULT_VIEW.centerX,
-  centerY: DEFAULT_VIEW.centerY,
-  halfW: DEFAULT_VIEW.halfW,
+  centerX: PRESETS[1][0].centerX,
+  centerY: PRESETS[1][0].centerY,
+  halfW: PRESETS[1][0].halfW,
 };
 
 const julia = {
@@ -113,6 +125,9 @@ let cacheReady = false;
 /** @type {{ x0: number; y0: number; x1: number; y1: number } | null} */
 let rubber = null;
 let rubberPointerId = null;
+
+/** @type {{ pointerId: number; lastSx: number; lastSy: number } | null} */
+let juliaLambdaDrag = null;
 
 /** Held keys for smooth pan (arrows / WASD) and zoom (+/−). */
 const keysPanZoom = {
@@ -267,6 +282,30 @@ function previewJuliaLabelsFromInputs() {
   juliaImLabel.textContent = Number.isFinite(im) ? im.toFixed(4) : "—";
 }
 
+/** Snap `julia` to slider grid and refresh range + labels (after λ-drag or programmatic edits). */
+function syncJuliaHudFromJuliaState() {
+  julia.re = clampJuliaComponent(julia.re);
+  julia.im = clampJuliaComponent(julia.im);
+  const rInt = Math.min(20000, Math.max(-20000, Math.round(julia.re * JULIA_SLIDER_SCALE)));
+  const iInt = Math.min(20000, Math.max(-20000, Math.round(julia.im * JULIA_SLIDER_SCALE)));
+  julia.re = rInt / JULIA_SLIDER_SCALE;
+  julia.im = iInt / JULIA_SLIDER_SCALE;
+  juliaReInput.value = String(rInt);
+  juliaImInput.value = String(iInt);
+  juliaReLabel.textContent = julia.re.toFixed(4);
+  juliaImLabel.textContent = julia.im.toFixed(4);
+}
+
+function clearCanvasPointerInteraction() {
+  rubber = null;
+  rubberPointerId = null;
+  juliaLambdaDrag = null;
+}
+
+function juliaCanvasModeIsLambdaDrag() {
+  return juliaCanvasModeSelect?.value === "lambda";
+}
+
 function applyRenderParamsFromInputs() {
   maxIterUser = readMaxIterFromInput();
   maxIterInput.value = String(maxIterUser);
@@ -384,11 +423,11 @@ function viewFromSquare(left, top, S) {
 
 function resetToDefaultView() {
   if (!gpuRenderer) return;
-  rubber = null;
-  rubberPointerId = null;
-  view.centerX = DEFAULT_VIEW.centerX;
-  view.centerY = DEFAULT_VIEW.centerY;
-  view.halfW = DEFAULT_VIEW.halfW;
+  clearCanvasPointerInteraction();
+  const d = defaultViewForFractalKind(fractalKind);
+  view.centerX = d.centerX;
+  view.centerY = d.centerY;
+  view.halfW = d.halfW;
   invalidateCache();
   const ms = fullRenderAndCommit();
   statusEl.textContent = `Reset · ${ms.toFixed(1)} ms`;
@@ -527,20 +566,47 @@ uiCanvas.addEventListener("pointerdown", (e) => {
   uiCanvas.setPointerCapture(e.pointerId);
   rubberPointerId = e.pointerId;
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
+  if (fractalKind === 1 && juliaCanvasModeIsLambdaDrag()) {
+    rubber = null;
+    juliaLambdaDrag = { pointerId: e.pointerId, lastSx: sx, lastSy: sy };
+    return;
+  }
+  juliaLambdaDrag = null;
   rubber = { x0: sx, y0: sy, x1: sx, y1: sy };
 });
 
 uiCanvas.addEventListener("pointermove", (e) => {
-  if (rubber === null || e.pointerId !== rubberPointerId) return;
+  if (e.pointerId !== rubberPointerId) return;
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
+  if (juliaLambdaDrag) {
+    const dx = sx - juliaLambdaDrag.lastSx;
+    const dy = sy - juliaLambdaDrag.lastSy;
+    const mult = e.shiftKey ? JULIA_LAMBDA_SHIFT_MULT : 1;
+    const step = JULIA_LAMBDA_PER_CANVAS_PX * mult;
+    julia.re = clampJuliaComponent(julia.re + dx * step);
+    julia.im = clampJuliaComponent(julia.im + dy * step);
+    syncJuliaHudFromJuliaState();
+    juliaLambdaDrag.lastSx = sx;
+    juliaLambdaDrag.lastSy = sy;
+    invalidateCache();
+    return;
+  }
+  if (rubber === null) return;
   rubber.x1 = sx;
   rubber.y1 = sy;
 });
 
 uiCanvas.addEventListener("pointerup", (e) => {
-  if (rubber === null || e.pointerId !== rubberPointerId) return;
+  if (e.pointerId !== rubberPointerId) return;
   uiCanvas.releasePointerCapture(e.pointerId);
   rubberPointerId = null;
+
+  if (juliaLambdaDrag) {
+    juliaLambdaDrag = null;
+    return;
+  }
+
+  if (rubber === null) return;
 
   const { x0, y0, x1, y1 } = rubber;
   rubber = null;
@@ -556,10 +622,13 @@ uiCanvas.addEventListener("pointerup", (e) => {
 });
 
 uiCanvas.addEventListener("pointercancel", (e) => {
-  if (rubberPointerId === e.pointerId) {
-    rubber = null;
-    rubberPointerId = null;
+  if (rubberPointerId !== e.pointerId) return;
+  try {
+    uiCanvas.releasePointerCapture(e.pointerId);
+  } catch {
+    /* already released */
   }
+  clearCanvasPointerInteraction();
 });
 
 resetViewBtn.addEventListener("click", () => {
@@ -583,6 +652,7 @@ fractalSelect.addEventListener("change", () => {
   if (fk === 3 || !Number.isFinite(fk)) fk = 0;
   fractalSelect.value = String(fk);
   fractalKind = fk;
+  clearCanvasPointerInteraction();
   updateJuliaPanelVisibility();
   syncParamsFromInputs();
 });
