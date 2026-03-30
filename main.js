@@ -1,9 +1,4 @@
-import init, {
-  alloc,
-  dealloc,
-  fill_smooth_palette_lut,
-  render_rgba,
-} from "./fractal-wasm/pkg/fractal_wasm.js";
+import init, { alloc, dealloc, fill_smooth_palette_lut } from "./fractal-wasm/pkg/fractal_wasm.js";
 import { createFractalGpuRenderer, webGpuSupported } from "./fractal-webgpu.js";
 
 const MIN_BOX_PX = 4;
@@ -15,18 +10,17 @@ const CANVAS_PX_MAX = 4096;
 const KEY_PAN_FRAC_PER_SEC = 0.42;
 /** Zoom: |d ln(halfW)/dt| while +/− held (exponential, smooth at any frame rate). */
 const KEY_ZOOM_LOG_PER_SEC = 0.62;
-/** Keyboard zoom clamp (not the real precision limit; GPU f32 breaks down earlier). */
+/** Keyboard zoom clamp. */
 const KEYBOARD_HALF_W_MIN = 1e-16;
 const KEYBOARD_HALF_W_MAX = 96;
 
-/**
- * Below this Re half-width, use WASM render_rgba (f64 pixel map). Mandelbrot uses tiled perturb there when
- * half_w &lt; 0.02 (see fractal-wasm perturb). ~5e-5 → zoom ×4e4 from default half-w 2 (before ~1e5 f32 blocks).
- */
-const WASM_F64_HALF_W = 5e-5;
-
 const MAX_ITER_MIN = 32;
 const MAX_ITER_MAX = 8192;
+
+/** Julia λ clamp (matches slider ±2). */
+const JULIA_C_LIM = 2;
+/** Range inputs store λ·10⁴ so one step is 0.0001 (min/max ±20000 → λ in ±2). */
+const JULIA_SLIDER_SCALE = 10000;
 
 const DEFAULT_VIEW = Object.freeze({
   centerX: -0.5,
@@ -83,18 +77,6 @@ const presetRound = { 0: 0, 1: 0, 2: 0, 3: 0 };
 
 let wasmMemory;
 
-/** Last `presentCpuRgba` time after an off-thread WASM render (main thread stays responsive during `render_rgba`). */
-let lastWasmPresentMs = 0;
-
-/** @type {Worker | null} */
-let wasmRenderWorker = null;
-/** If worker creation or runtime fails, keep using synchronous WASM render on the main thread. */
-let wasmRenderSyncFallback = false;
-let wasmRenderSeq = 0;
-let wasmRenderInFlight = false;
-/** @type {ReturnType<typeof buildWasmRenderJob> | null} */
-let wasmRenderPending = null;
-
 /**
  * @type {{
  *   drawFull: (p: object, o?: object) => number;
@@ -143,6 +125,11 @@ const keysPanZoom = {
 };
 /** @type {number} performance.now() ms; 0 = skip dt on first frame */
 let lastKeyboardNavT = 0;
+
+function clampJuliaComponent(v) {
+  if (!Number.isFinite(v)) return 0;
+  return Math.min(JULIA_C_LIM, Math.max(-JULIA_C_LIM, v));
+}
 
 function isTypingFocusTarget(target) {
   if (!target || typeof target !== "object") return false;
@@ -274,18 +261,18 @@ function syncIterLabel() {
 }
 
 function previewJuliaLabelsFromInputs() {
-  const re = Number(juliaReInput.value) / 1000;
-  const im = Number(juliaImInput.value) / 1000;
-  juliaReLabel.textContent = Number.isFinite(re) ? re.toFixed(3) : "—";
-  juliaImLabel.textContent = Number.isFinite(im) ? im.toFixed(3) : "—";
+  const re = Number(juliaReInput.value) / JULIA_SLIDER_SCALE;
+  const im = Number(juliaImInput.value) / JULIA_SLIDER_SCALE;
+  juliaReLabel.textContent = Number.isFinite(re) ? re.toFixed(4) : "—";
+  juliaImLabel.textContent = Number.isFinite(im) ? im.toFixed(4) : "—";
 }
 
 function applyRenderParamsFromInputs() {
   maxIterUser = readMaxIterFromInput();
   maxIterInput.value = String(maxIterUser);
   syncIterLabel();
-  julia.re = Number(juliaReInput.value) / 1000;
-  julia.im = Number(juliaImInput.value) / 1000;
+  julia.re = clampJuliaComponent(Number(juliaReInput.value) / JULIA_SLIDER_SCALE);
+  julia.im = clampJuliaComponent(Number(juliaImInput.value) / JULIA_SLIDER_SCALE);
   if (!Number.isFinite(julia.re)) julia.re = 0;
   if (!Number.isFinite(julia.im)) julia.im = 0;
   previewJuliaLabelsFromInputs();
@@ -337,162 +324,12 @@ function gpuParams(over = {}) {
   };
 }
 
-function buildWasmRenderJob() {
-  const p = gpuParams();
-  const nw = canvas.width | 0;
-  const nh = canvas.height | 0;
-  return {
-    fp: buildFingerprint(),
-    committed: { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW },
-    nw,
-    nh,
-    centerX: p.centerX,
-    centerY: p.centerY,
-    halfW: p.halfW,
-    aspect: nh / nw,
-    maxIter: p.maxIter >>> 0,
-    fractalKind: fractalKind >>> 0,
-    juliaRe: julia.re,
-    juliaIm: julia.im,
-    paletteId: p.paletteId >>> 0,
-    perturbMode: fractalKind === 0 ? 2 : 0,
-  };
-}
-
-function ensureWasmRenderWorker() {
-  if (wasmRenderWorker || wasmRenderSyncFallback) return;
-  try {
-    wasmRenderWorker = new Worker(new URL("./fractal-render-worker.js", import.meta.url), { type: "module" });
-    wasmRenderWorker.onmessage = onWasmWorkerMessage;
-    wasmRenderWorker.onerror = (e) => {
-      console.error(e);
-      wasmRenderSyncFallback = true;
-      wasmRenderInFlight = false;
-      if (wasmRenderWorker) {
-        try {
-          wasmRenderWorker.terminate();
-        } catch (_) {
-          /* ignore */
-        }
-        wasmRenderWorker = null;
-      }
-    };
-  } catch (e) {
-    console.error(e);
-    wasmRenderSyncFallback = true;
-  }
-}
-
 /**
- * @param {ReturnType<typeof buildWasmRenderJob>} job
- */
-function scheduleWasmRender(job) {
-  wasmRenderPending = job;
-  pumpWasmRender();
-}
-
-function pumpWasmRender() {
-  if (wasmRenderInFlight || wasmRenderPending === null || !wasmRenderWorker) return;
-  const job = wasmRenderPending;
-  wasmRenderPending = null;
-  wasmRenderInFlight = true;
-  wasmRenderSeq++;
-  wasmRenderWorker.postMessage({ type: "wasmRender", seq: wasmRenderSeq, ...job });
-}
-
-/**
- * @param {MessageEvent} e
- */
-function onWasmWorkerMessage(e) {
-  const d = e.data;
-  if (d?.type !== "wasmRenderDone" || !gpuRenderer) return;
-  wasmRenderInFlight = false;
-  if (!d.ok) {
-    console.error(d.error);
-    wasmRenderSyncFallback = true;
-    if (wasmRenderWorker) {
-      try {
-        wasmRenderWorker.terminate();
-      } catch (_) {
-        /* ignore */
-      }
-      wasmRenderWorker = null;
-    }
-    pumpWasmRender();
-    return;
-  }
-  if (d.seq !== wasmRenderSeq) {
-    pumpWasmRender();
-    return;
-  }
-  if (buildFingerprint() !== d.fp || !viewsEqual(view, d.committed)) {
-    pumpWasmRender();
-    return;
-  }
-  const u8 = new Uint8Array(d.buffer);
-  const ms = gpuRenderer.presentCpuRgba(u8, d.nw, d.nh, { bytesPerRow: d.bytesPerRow });
-  lastWasmPresentMs = ms;
-  committedView = { centerX: d.committed.centerX, centerY: d.committed.centerY, halfW: d.committed.halfW };
-  cacheFingerprint = d.fp;
-  cacheReady = true;
-  pumpWasmRender();
-}
-
-function fullRenderAndCommitSyncWasm() {
-  const p = gpuParams();
-  const nw = canvas.width | 0;
-  const nh = canvas.height | 0;
-  const need = nw * nh * 4;
-  const ptr = alloc(need);
-  try {
-    const perturbMode = fractalKind === 0 ? 2 : 0;
-    render_rgba(
-      ptr,
-      need,
-      nw >>> 0,
-      nh >>> 0,
-      p.centerX,
-      p.centerY,
-      p.halfW,
-      nh / nw,
-      p.maxIter >>> 0,
-      fractalKind >>> 0,
-      julia.re,
-      julia.im,
-      p.paletteId >>> 0,
-      perturbMode,
-    );
-    const u8 = new Uint8Array(wasmMemory.buffer, ptr, need);
-    const ms = gpuRenderer.presentCpuRgba(u8, nw, nh);
-    lastWasmPresentMs = ms;
-    committedView = { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW };
-    cacheFingerprint = buildFingerprint();
-    cacheReady = true;
-    return ms;
-  } finally {
-    dealloc(ptr, need);
-  }
-}
-
-/**
- * @returns {number} ms (0 when WASM work was queued to a worker; see `lastWasmPresentMs` for last texture upload time)
+ * @returns {number} ms GPU time for compute + present
  */
 function fullRenderAndCommit() {
   if (!gpuRenderer) return 0;
-  const p = gpuParams();
-  const nw = canvas.width | 0;
-  const nh = canvas.height | 0;
-
-  if (p.halfW < WASM_F64_HALF_W && nw > 0 && nh > 0) {
-    ensureWasmRenderWorker();
-    if (!wasmRenderSyncFallback && wasmRenderWorker) {
-      scheduleWasmRender(buildWasmRenderJob());
-      return 0;
-    }
-    return fullRenderAndCommitSyncWasm();
-  }
-
-  const ms = gpuRenderer.drawFull(p);
+  const ms = gpuRenderer.drawFull(gpuParams());
   committedView = { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW };
   cacheFingerprint = buildFingerprint();
   cacheReady = true;
@@ -554,8 +391,7 @@ function resetToDefaultView() {
   view.halfW = DEFAULT_VIEW.halfW;
   invalidateCache();
   const ms = fullRenderAndCommit();
-  const msShow = ms > 0 ? ms : lastWasmPresentMs;
-  statusEl.textContent = `Reset · ${msShow.toFixed(1)} ms`;
+  statusEl.textContent = `Reset · ${ms.toFixed(1)} ms`;
 }
 
 function drawRubberOverlay() {
@@ -680,10 +516,8 @@ function frame() {
   drawRubberOverlay();
 
   const tag = gpuRenderer?.usedGpuPerturb ? " · GPU perturb" : "";
-  const inWasmBand = view.halfW < WASM_F64_HALF_W;
-  const showMs = ms > 0 ? ms : inWasmBand ? lastWasmPresentMs : 0;
   statusEl.textContent =
-    showMs > 0 ? `${cw}×${ch}${tag} · ${showMs.toFixed(1)} ms` : `${cw}×${ch}${tag}`;
+    ms > 0 ? `${cw}×${ch}${tag} · ${ms.toFixed(1)} ms` : `${cw}×${ch}${tag}`;
 
   requestAnimationFrame(frame);
 }

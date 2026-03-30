@@ -20,7 +20,7 @@ The reference \(Z_n\) is computed in extended precision (or double-double / arbi
 
 - **`perturb.rs`**: tiled **f64** Mandelbrot perturbation (reference orbit per tile, δ recurrence, glitch fallback to direct escape).
 - **`render_rgba`**: **Mandelbrot** with `perturb_mode` 1 (on) or 2 (auto when `half_w < PERTURB_AUTO_HALF_W`) uses **`render_mandelbrot_perturb`**; otherwise **`render_all_f64`** (Julia, Burning Ship, coarse Mandelbrot).
-- The **interactive app** uses WebGPU until **`WASM_F64_HALF_W`**; below that it calls **`render_rgba`** (Mandelbrot passes **perturb_mode 2**). See [GPU.md](GPU.md).
+- The **interactive app** renders only via **WebGPU** (double-single `c` + orbit); **`render_rgba` / perturb** remain in this crate for tooling or future use. See [GPU.md](GPU.md).
 
 ## Roadmap
 

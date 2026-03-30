@@ -185,17 +185,17 @@
         <div id="juliaPanel" hidden>
           <label>
             Julia Re <span id="juliaReLabel"></span>
-            <input id="juliaRe" type="range" min="-2000" max="2000" step="1" value="-727" />
+            <input id="juliaRe" type="range" min="-20000" max="20000" step="1" value="-7269" />
           </label>
           <label>
             Julia Im <span id="juliaImLabel"></span>
-            <input id="juliaIm" type="range" min="-2000" max="2000" step="1" value="189" />
+            <input id="juliaIm" type="range" min="-20000" max="20000" step="1" value="1889" />
           </label>
         </div>
         <button type="button" class="hudBtn" id="nextPreset">Next preset</button>
         <button type="button" class="hudBtn" id="resetView">Reset view</button>
         <div class="hint">
-          WebGPU for moderate zoom; past a half-width cutoff all fractals use WASM f64 mapping (Mandelbrot: tiled f64 perturb). Drag to box-zoom; arrows/WASD pan; +/− zoom (hold). Julia c, max iter, and palette update the image as you change them.
+          WebGPU only: double-single pixel c and orbit (Julia λ included). Drag to box-zoom; arrows/WASD pan; +/− zoom (hold). Julia λ sliders step by 0.0001; max iter and palette update the image as you change them.
         </div>
         <div id="status"></div>
       </div>
