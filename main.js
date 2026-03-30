@@ -275,7 +275,7 @@ let juliaTourSpeedMult = 1;
 let juliaTourDirRe = 1;
 let juliaTourDirIm = 1;
 
-/** HUD intent for new / resumed tours (both buttons off ⇒ Lissajous box sweep). */
+/** HUD intent for new / resumed tours (random walk off ⇒ Lissajous box sweep). */
 let juliaTourPathIntent = /** @type {"lissajous" | "randomWalk"} */ ("lissajous");
 
 /** Held keys for smooth pan (arrows / WASD) and zoom (+/−). */

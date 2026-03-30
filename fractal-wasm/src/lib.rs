@@ -1,5 +1,7 @@
-//! Escape-time fractal RGBA renderer (WASM).
-//! Pixel mapping and iteration use **f64** so deep zoom keeps sub-pixel c resolution.
+//! WebAssembly build of escape-time fractal code.
+//! The hosted app uses **`fill_smooth_palette_lut`** for the **WebGPU** palette; **`render_rgba`**
+//! is a full **f64** CPU render path (optional Mandelbrot perturbation), not used for on-canvas pixels in the web UI.
+//! That path uses **f64** so deep zoom keeps sub-pixel **c** resolution when invoked.
 
 mod perturb;
 

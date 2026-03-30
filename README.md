@@ -1,6 +1,8 @@
 # escape-time-fracta
 
-A fractal renderer using **WebAssembly** and JavaScript. The Rust core maps pixels and runs the escape-time loop in **64-bit float** so deep zoom keeps correct **c** spacing (the previous **f32** path loses detail when `halfW` is very small). GPU acceleration is not used.
+Fractal explorer for the browser. The **interactive UI** draws with **WebGPU** ([`fractal-webgpu.js`](fractal-webgpu.js)): WGSL uses **double-single** arithmetic for per-pixel **c** and the orbit so deep zoom stays coherent (unlike a plain **f32**-only orbit). **WebAssembly** loads the [`fractal-wasm`](fractal-wasm) crate and runs **`fill_smooth_palette_lut`** on the CPU; the hosted app does **not** run the per-pixel escape loop in WASM.
+
+The **`fractal-wasm`** library still implements **f64** iteration and optional **Mandelbrot perturbation** in `render_rgba` for tooling or future use ([`PERTURBATION.md`](fractal-wasm/PERTURBATION.md), [`GPU.md`](fractal-wasm/GPU.md)).
 
 ## Prerequisites (development)
 
@@ -60,4 +62,6 @@ Do not open `index.html` directly from the file system (`file://`): ES module im
 
 ## Browser note
 
-Use a current browser with WebAssembly support. If the module fails to load, check the console for fetch/MIME or instantiation errors.
+The live app **requires WebGPU** (recent Chromium, Edge, or another WebGPU-capable browser). If the GPU path fails to start, the status line shows an error.
+
+You still need **WebAssembly** support so the WASM module can load. If initialization fails, check the console for fetch/MIME or instantiation errors.
