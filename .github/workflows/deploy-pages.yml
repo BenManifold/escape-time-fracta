@@ -1,0 +1,60 @@
+# Build fractal-wasm with wasm-pack and deploy the static app to GitHub Pages.
+# Repo settings: Settings → Pages → Build and deployment → Source: GitHub Actions.
+
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fractal-wasm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      # `web` (not default `bundler`) so glue uses fetch + instantiate; bundler emits wasm ES imports that break on static hosts (e.g. Firefox on GitHub Pages).
+      - name: wasm-pack build
+        run: wasm-pack build --release --target web
+        working-directory: fractal-wasm
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site/fractal-wasm/pkg
+          cp index.html main.js fractal-webgpu.js _site/
+          cp -r fractal-wasm/pkg/* _site/fractal-wasm/pkg/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
