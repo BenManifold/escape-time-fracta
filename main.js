@@ -19,10 +19,27 @@ const MAX_ITER_MAX = 8192;
 
 /** Julia λ clamp (matches HUD ±2). */
 const JULIA_C_LIM = 2;
+/** λ disk: keep pointer mapping inside the rim (px). */
+const JULIA_LAMBDA_WHEEL_INSET = 8;
+/** Knob offset from center as % of disk width/height (matches pointer mapping). */
+const JULIA_LAMBDA_WHEEL_KNOB_FRAC = 42;
 /** Julia “λ drag” mode: one backing-store pixel of motion changes λ by this much on that axis. */
 const JULIA_LAMBDA_PER_CANVAS_PX = 0.0001;
 /** With Shift held, scale the above by this factor (0.001× → finer strokes). */
 const JULIA_LAMBDA_SHIFT_MULT = 0.001;
+
+/** Damped spring toward release point after λ-drag (a = k·(p₀−p) − c·v). Defaults; live values from HUD sliders. */
+const JIGGLE_DEFAULT_SPRING_K = 265;
+const JIGGLE_DEFAULT_DAMPING_C = 9;
+const JIGGLE_DEFAULT_VELOCITY_GAIN = 3;
+const JIGGLE_DEFAULT_VEL_CAP = 70;
+/** Below this speed (in λ units/sec, after gain), skip jiggle. */
+const JIGGLE_SPEED_THRESHOLD = 4e-5;
+/** Impulse scale when λ tour step (−1/0/1 per axis) changes and jiggle snap is on. */
+const JIGGLE_DIR_KICK_PER_STEP = 0.014;
+const JIGGLE_POS_EPS = 1e-7;
+const JIGGLE_VEL_EPS = 2e-6;
+const JIGGLE_MAX_SEC = 3.2;
 
 /**
  * Julia λ tour: phase advance per animation frame (rad). Re/Im sweep [-JULIA_C_LIM, JULIA_C_LIM]
@@ -31,11 +48,15 @@ const JULIA_LAMBDA_SHIFT_MULT = 0.001;
 const JULIA_TOUR_DPHASE_RAD = 5e-8;
 /** Im uses phase * this factor so Re/Im don’t stay locked in phase. */
 const JULIA_TOUR_IM_PHASE_MUL = 0.618033988749895;
-/** When |Re λ| and |Im λ| are both within this of 0, phase advances this many times faster. */
-const JULIA_TOUR_ORIGIN_HALF = 0.36
-const JULIA_TOUR_NEAR_ORIGIN_MULT = 150
 /** Upper bound for global φ scan on resync (Lissajous is quasi-periodic; wide span avoids wrong local minima). */
 const JULIA_TOUR_RESYNC_PHI_MAX = 3000 * Math.PI
+/** Min half-width of Lissajous box per axis (λ at a face still gets a tiny oscillation). */
+const JULIA_TOUR_MIN_BOX_HALF = 0.02
+
+/** Random-walk: ms between independent Re/Im step picks (−1, 0, +1 per axis). */
+const JULIA_RW_CHOICE_MS = 5000;
+/** Random-walk: seconds to ease heading / step magnitude after a discrete direction change. */
+const JULIA_RW_DIR_BLEND_SEC = 0.15;
 
 /** Mandelbrot multibrot z^p + c: Δp per backing-store pixel (horizontal drag). */
 const MANDEL_EXP_PER_CANVAS_PX = 0.006;
@@ -59,17 +80,28 @@ const statusEl = document.getElementById("status");
 const juliaPanel = document.getElementById("juliaPanel");
 const juliaReInput = document.getElementById("juliaRe");
 const juliaImInput = document.getElementById("juliaIm");
+const juliaLambdaWheel = document.getElementById("juliaLambdaWheel");
+const juliaLambdaWheelKnob = document.getElementById("juliaLambdaWheelKnob");
 const juliaReLabel = document.getElementById("juliaReLabel");
 const juliaImLabel = document.getElementById("juliaImLabel");
 const juliaModeBoxBtn = document.getElementById("juliaModeBox");
 const juliaModeLambdaBtn = document.getElementById("juliaModeLambda");
 const juliaTourPlayBtn = document.getElementById("juliaTourPlay");
 const juliaTourPauseBtn = document.getElementById("juliaTourPause");
-const juliaTourDirReBtn = document.getElementById("juliaTourDirRe");
-const juliaTourDirImBtn = document.getElementById("juliaTourDirIm");
+const juliaTourDirPad = document.getElementById("juliaTourDirPad");
+const juliaPathRandomWalkBtn = document.getElementById("juliaPathRandomWalk");
 const juliaTourSpeedBtns = /** @type {NodeListOf<HTMLButtonElement>} */ (
   document.querySelectorAll(".juliaTourSpeedBtn")
 );
+const juliaJiggleSnapBtn = document.getElementById("juliaJiggleSnapBtn");
+const juliaJiggleSpringInput = document.getElementById("juliaJiggleSpring");
+const juliaJiggleDampingInput = document.getElementById("juliaJiggleDamping");
+const juliaJiggleCarryInput = document.getElementById("juliaJiggleCarry");
+const juliaJiggleCapInput = document.getElementById("juliaJiggleCap");
+const juliaJiggleSpringVal = document.getElementById("juliaJiggleSpringVal");
+const juliaJiggleDampingVal = document.getElementById("juliaJiggleDampingVal");
+const juliaJiggleCarryVal = document.getElementById("juliaJiggleCarryVal");
+const juliaJiggleCapVal = document.getElementById("juliaJiggleCapVal");
 const mandelPanel = document.getElementById("mandelPanel");
 const mandelModeBoxBtn = document.getElementById("mandelModeBox");
 const mandelModeExpBtn = document.getElementById("mandelModeExp");
@@ -132,9 +164,13 @@ const view = {
   halfW: PRESETS[1][0].halfW,
 };
 
+/** Default λ for Julia (matches HUD initial inputs). */
+const DEFAULT_JULIA_RE = -0.7269;
+const DEFAULT_JULIA_IM = 0.1889;
+
 const julia = {
-  re: -0.7269,
-  im: 0.1889,
+  re: DEFAULT_JULIA_RE,
+  im: DEFAULT_JULIA_IM,
 };
 
 let maxIterUser = clampMaxIter(Number(maxIterInput.value));
@@ -155,9 +191,53 @@ let rubber = null;
 let rubberPointerId = null;
 
 /**
- * @type {{ pointerId: number; lastSx: number; lastSy: number; resumeTourAfter: boolean } | null}
+ * @type {{
+ *   pointerId: number;
+ *   lastSx: number;
+ *   lastSy: number;
+ *   resumeTourAfter: boolean;
+ *   lastMoveT: number;
+ *   velRe: number;
+ *   velIm: number;
+ *   lastDRe: number;
+ *   lastDIm: number;
+ * } | null}
  */
 let juliaLambdaDrag = null;
+
+/**
+ * HUD λ disk drag: velocity for jiggle on release (same physics as canvas λ-drag).
+ * @type {{
+ *   lastMoveT: number;
+ *   velRe: number;
+ *   velIm: number;
+ *   lastDRe: number;
+ *   lastDIm: number;
+ * } | null}
+ */
+let juliaLambdaWheelDrag = null;
+
+/** Canvas λ-drag release: damped settle toward drop point. */
+let juliaJiggleSnapEnabled = true;
+
+let jiggleSpringK = JIGGLE_DEFAULT_SPRING_K;
+let jiggleDampingC = JIGGLE_DEFAULT_DAMPING_C;
+let jiggleVelocityGain = JIGGLE_DEFAULT_VELOCITY_GAIN;
+let jiggleVelCap = JIGGLE_DEFAULT_VEL_CAP;
+
+/**
+ * @type {{
+ *   targetRe: number;
+ *   targetIm: number;
+ *   velRe: number;
+ *   velIm: number;
+ *   t0: number;
+ * } | null}
+ */
+let juliaJiggle = null;
+
+/** Tour resume deferred until jiggle finishes (when drag had paused a playing tour). */
+let pendingTourResumeAfterJiggle = false;
 
 /** True while writing Julia slider DOM from code (avoids `input` handlers stopping a paused λ tour). */
 let syncingJuliaInputsFromState = false;
@@ -175,8 +255,26 @@ let mandelExponent = 2;
 let mandelExpDrag = null;
 
 /**
- * Slow λ tour: phase-driven sin sweeps on Re/Im within [reMin,reMax]×[imMin,imMax].
- * @type {{ phase: number; reMin: number; reMax: number; imMin: number; imMax: number; paused: boolean; speedMult: number; dirRe: number; dirIm: number } | null}
+ * Slow λ tour: Lissajous sin sweeps or random-walk axis steps.
+ * @type {{
+ *   phase: number;
+ *   reMin: number;
+ *   reMax: number;
+ *   imMin: number;
+ *   imMax: number;
+ *   paused: boolean;
+ *   speedMult: number;
+ *   dirRe: number;
+ *   dirIm: number;
+ *   pathMode: "lissajous" | "randomWalk";
+ *   rwChoiceAccumMs?: number;
+ *   rwDirBlendRemainSec?: number;
+ *   rwBlendMode?: "turn" | "fromIdle" | "toIdle";
+ *   rwBlendFromUx?: number;
+ *   rwBlendFromUy?: number;
+ *   rwBlendToUx?: number;
+ *   rwBlendToUy?: number;
+ * } | null}
  */
 let juliaLambdaTour = null;
 
@@ -184,6 +282,9 @@ let juliaLambdaTour = null;
 let juliaTourSpeedMult = 1;
 let juliaTourDirRe = 1;
 let juliaTourDirIm = 1;
+
+/** HUD intent for new / resumed tours (random walk off ⇒ Lissajous box sweep). */
+let juliaTourPathIntent = /** @type {"lissajous" | "randomWalk"} */ ("lissajous");
 
 /** Held keys for smooth pan (arrows / WASD) and zoom (+/−). */
 const keysPanZoom = {
@@ -360,12 +461,319 @@ function syncJuliaHudFromJuliaState() {
   }
   juliaReLabel.textContent = julia.re.toFixed(6);
   juliaImLabel.textContent = julia.im.toFixed(6);
+  updateJuliaLambdaWheelVisual();
+}
+
+/**
+ * Move the λ disk knob and aria to match `julia` (disk maps Re/Im to horizontal/vertical in ±JULIA_C_LIM).
+ */
+function updateJuliaLambdaWheelVisual() {
+  const knob = juliaLambdaWheelKnob;
+  const wheel = juliaLambdaWheel;
+  if (!knob || !wheel) return;
+  let nx = julia.re / JULIA_C_LIM;
+  let nyScr = -julia.im / JULIA_C_LIM;
+  if (!Number.isFinite(nx)) nx = 0;
+  if (!Number.isFinite(nyScr)) nyScr = 0;
+  const d = Math.hypot(nx, nyScr);
+  if (d > 1 && d > 1e-12) {
+    nx /= d;
+    nyScr /= d;
+  }
+  const fr = JULIA_LAMBDA_WHEEL_KNOB_FRAC;
+  knob.style.left = `calc(50% + ${nx * fr}%)`;
+  knob.style.top = `calc(50% + ${nyScr * fr}%)`;
+  wheel.setAttribute("aria-valuetext", `Re ${julia.re.toFixed(4)}, Im ${julia.im.toFixed(4)}`);
+}
+
+/**
+ * @param {number} clientX
+ * @param {number} clientY
+ */
+function lambdaWheelClientToReIm(clientX, clientY) {
+  const el = juliaLambdaWheel;
+  if (!el) {
+    return { re: julia.re, im: julia.im };
+  }
+  const rect = el.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const radiusPx = Math.max(
+    10,
+    Math.min(rect.width, rect.height) / 2 - JULIA_LAMBDA_WHEEL_INSET,
+  );
+  let dx = clientX - cx;
+  let dy = clientY - cy;
+  const dist = Math.hypot(dx, dy);
+  if (dist > radiusPx && dist > 1e-6) {
+    dx *= radiusPx / dist;
+    dy *= radiusPx / dist;
+  }
+  const nx = dx / radiusPx;
+  const ny = dy / radiusPx;
+  return {
+    re: clampJuliaComponent(nx * JULIA_C_LIM),
+    im: clampJuliaComponent(-ny * JULIA_C_LIM),
+  };
+}
+
+/**
+ * @param {number} clientX
+ * @param {number} clientY
+ * @param {{ trackVelocity?: boolean }} [opts]
+ */
+function applyJuliaLambdaFromWheelClient(clientX, clientY, opts) {
+  if (fractalKind !== 1) return;
+  const prevRe = julia.re;
+  const prevIm = julia.im;
+  const { re, im } = lambdaWheelClientToReIm(clientX, clientY);
+  julia.re = re;
+  julia.im = im;
+  if (opts?.trackVelocity && juliaLambdaWheelDrag) {
+    const now = performance.now();
+    const dRe = re - prevRe;
+    const dIm = im - prevIm;
+    if (juliaLambdaWheelDrag.lastMoveT > 0) {
+      const dtSec = Math.max(1e-4, (now - juliaLambdaWheelDrag.lastMoveT) / 1000);
+      juliaLambdaWheelDrag.velRe = dRe / dtSec;
+      juliaLambdaWheelDrag.velIm = dIm / dtSec;
+    }
+    juliaLambdaWheelDrag.lastMoveT = now;
+    juliaLambdaWheelDrag.lastDRe = dRe;
+    juliaLambdaWheelDrag.lastDIm = dIm;
+  }
+  syncJuliaHudFromJuliaState();
+  invalidateCache();
 }
 
 function clearCanvasPointerInteraction() {
   rubber = null;
   rubberPointerId = null;
   juliaLambdaDrag = null;
+}
+
+function clearJiggleSnapState() {
+  if (juliaJiggle) {
+    julia.re = clampJuliaComponent(juliaJiggle.targetRe);
+    julia.im = clampJuliaComponent(juliaJiggle.targetIm);
+    juliaJiggle = null;
+    syncJuliaHudFromJuliaState();
+  }
+  pendingTourResumeAfterJiggle = false;
+}
+
+function updateJuliaJiggleSnapToggleUI() {
+  if (!juliaJiggleSnapBtn) return;
+  juliaJiggleSnapBtn.classList.toggle("juliaModeBtnActive", juliaJiggleSnapEnabled);
+  juliaJiggleSnapBtn.setAttribute("aria-pressed", juliaJiggleSnapEnabled ? "true" : "false");
+}
+
+function updateJiggleParamValueLabels() {
+  if (juliaJiggleSpringVal) {
+    juliaJiggleSpringVal.textContent = String(Math.round(jiggleSpringK));
+  }
+  if (juliaJiggleDampingVal) {
+    juliaJiggleDampingVal.textContent = String(Math.round(jiggleDampingC));
+  }
+  if (juliaJiggleCarryVal) {
+    juliaJiggleCarryVal.textContent =
+      Math.abs(jiggleVelocityGain - Math.round(jiggleVelocityGain)) < 1e-6
+        ? String(Math.round(jiggleVelocityGain))
+        : jiggleVelocityGain.toFixed(1);
+  }
+  if (juliaJiggleCapVal) {
+    juliaJiggleCapVal.textContent = String(Math.round(jiggleVelCap));
+  }
+}
+
+/** Read elastic-release sliders into runtime spring parameters. */
+function syncJigglePhysicsFromInputs() {
+  if (juliaJiggleSpringInput) {
+    const v = Number(juliaJiggleSpringInput.value);
+    jiggleSpringK = Number.isFinite(v) ? v : JIGGLE_DEFAULT_SPRING_K;
+  }
+  if (juliaJiggleDampingInput) {
+    const v = Number(juliaJiggleDampingInput.value);
+    jiggleDampingC = Number.isFinite(v) ? v : JIGGLE_DEFAULT_DAMPING_C;
+  }
+  if (juliaJiggleCarryInput) {
+    const v = Number(juliaJiggleCarryInput.value) / 10;
+    jiggleVelocityGain = Number.isFinite(v) ? v : JIGGLE_DEFAULT_VELOCITY_GAIN;
+  }
+  if (juliaJiggleCapInput) {
+    const v = Number(juliaJiggleCapInput.value);
+    jiggleVelCap = Number.isFinite(v) ? v : JIGGLE_DEFAULT_VEL_CAP;
+  }
+  updateJiggleParamValueLabels();
+}
+
+/**
+ * Elastic jiggle fights discrete random-walk stepping; skip only while that path is **actively playing**.
+ * Random-walk as HUD intent alone, or a paused RW tour, must not disable λ-drag / λ-disk release jiggle.
+ */
+function juliaJiggleDisabledForRandomWalk() {
+  const t = juliaLambdaTour;
+  return !!t && !t.paused && (t.pathMode ?? "lissajous") === "randomWalk";
+}
+
+/**
+ * Start jiggle from pointer-drag λ velocity (canvas drag or λ disk).
+ * @param {{ velRe?: number; velIm?: number; lastDRe: number; lastDIm: number }} velState
+ * @param {boolean} pendingTourResumeAfter
+ * @returns {boolean} true if jiggle started
+ */
+function tryJuliaJiggleAfterPointerDragVelocity(velState, pendingTourResumeAfter) {
+  if (
+    !juliaJiggleSnapEnabled ||
+    fractalKind !== 1 ||
+    juliaJiggle ||
+    juliaJiggleDisabledForRandomWalk()
+  ) {
+    return false;
+  }
+  let vRe = (velState.velRe ?? 0) * jiggleVelocityGain;
+  let vIm = (velState.velIm ?? 0) * jiggleVelocityGain;
+  let speed = Math.hypot(vRe, vIm);
+  if (speed < JIGGLE_SPEED_THRESHOLD && (velState.lastDRe !== 0 || velState.lastDIm !== 0)) {
+    const fallbackDt = 1 / 60;
+    vRe = (velState.lastDRe / fallbackDt) * jiggleVelocityGain;
+    vIm = (velState.lastDIm / fallbackDt) * jiggleVelocityGain;
+    speed = Math.hypot(vRe, vIm);
+  }
+  if (speed < JIGGLE_SPEED_THRESHOLD) return false;
+  juliaJiggle = {
+    targetRe: julia.re,
+    targetIm: julia.im,
+    velRe: Math.max(-jiggleVelCap, Math.min(jiggleVelCap, vRe)),
+    velIm: Math.max(-jiggleVelCap, Math.min(jiggleVelCap, vIm)),
+    t0: performance.now(),
+  };
+  pendingTourResumeAfterJiggle = pendingTourResumeAfter;
+  invalidateCache();
+  return true;
+}
+
+/**
+ * End canvas λ-drag: optional damped jiggle toward release point, or immediate tour resume.
+ * @param {boolean} resumeTourAfter
+ */
+function endJuliaLambdaDragFromPointer(resumeTourAfter) {
+  const drag = juliaLambdaDrag;
+  juliaLambdaDrag = null;
+  if (!drag) {
+    if (resumeTourAfter) {
+      resumeJuliaLambdaTourAfterLambdaDrag();
+    }
+    invalidateCache();
+    return;
+  }
+
+  if (tryJuliaJiggleAfterPointerDragVelocity(drag, resumeTourAfter)) {
+    return;
+  }
+
+  if (resumeTourAfter) {
+    resumeJuliaLambdaTourAfterLambdaDrag();
+  }
+  invalidateCache();
+}
+
+function endJuliaLambdaWheelDragFromPointer() {
+  const d = juliaLambdaWheelDrag;
+  juliaLambdaWheelDrag = null;
+  if (!d) {
+    invalidateCache();
+    return;
+  }
+  if (tryJuliaJiggleAfterPointerDragVelocity(d, false)) {
+    return;
+  }
+  invalidateCache();
+}
+
+/**
+ * If jiggle snap is enabled, start a short spring settle at the current λ with an impulse from the
+ * tour direction change (same physics as drag release). Skips if the pad step did not change.
+ * @param {number} prevRe
+ * @param {number} prevIm
+ * @param {number} nextRe
+ * @param {number} nextIm
+ */
+function tryStartJuliaJiggleAfterTourDirChange(prevRe, prevIm, nextRe, nextIm) {
+  if (!juliaJiggleSnapEnabled || fractalKind !== 1 || juliaJiggleDisabledForRandomWalk()) return;
+  const pr = juliaTourPadStep(prevRe);
+  const pi = juliaTourPadStep(prevIm);
+  const nr = juliaTourPadStep(nextRe);
+  const ni = juliaTourPadStep(nextIm);
+  if (pr === nr && pi === ni) return;
+
+  let vRe = (nr - pr) * JIGGLE_DIR_KICK_PER_STEP * jiggleVelocityGain;
+  let vIm = (ni - pi) * JIGGLE_DIR_KICK_PER_STEP * jiggleVelocityGain;
+  const speed = Math.hypot(vRe, vIm);
+  if (speed < JIGGLE_SPEED_THRESHOLD) return;
+
+  if (juliaJiggle) {
+    julia.re = clampJuliaComponent(juliaJiggle.targetRe);
+    julia.im = clampJuliaComponent(juliaJiggle.targetIm);
+    juliaJiggle = null;
+    syncJuliaHudFromJuliaState();
+  }
+
+  juliaJiggle = {
+    targetRe: julia.re,
+    targetIm: julia.im,
+    velRe: Math.max(-jiggleVelCap, Math.min(jiggleVelCap, vRe)),
+    velIm: Math.max(-jiggleVelCap, Math.min(jiggleVelCap, vIm)),
+    t0: performance.now(),
+  };
+  pendingTourResumeAfterJiggle = false;
+  invalidateCache();
+}
+
+/** @param {number} dtSec */
+function tickJuliaJiggleSnap(dtSec) {
+  if (!juliaJiggle || fractalKind !== 1) return;
+  const dt = Math.max(1e-4, Math.min(0.048, dtSec > 0 ? dtSec : 1 / 60));
+
+  const j = juliaJiggle;
+  let { velRe, velIm } = j;
+  let re = julia.re;
+  let im = julia.im;
+  const { targetRe, targetIm } = j;
+
+  const aRe = jiggleSpringK * (targetRe - re) - jiggleDampingC * velRe;
+  const aIm = jiggleSpringK * (targetIm - im) - jiggleDampingC * velIm;
+  velRe += aRe * dt;
+  velIm += aIm * dt;
+  re += velRe * dt;
+  im += velIm * dt;
+  re = clampJuliaComponent(re);
+  im = clampJuliaComponent(im);
+
+  julia.re = re;
+  julia.im = im;
+  j.velRe = velRe;
+  j.velIm = velIm;
+
+  const err = Math.hypot(re - targetRe, im - targetIm);
+  const spd = Math.hypot(velRe, velIm);
+  const elapsed = (performance.now() - j.t0) / 1000;
+
+  if ((err < JIGGLE_POS_EPS && spd < JIGGLE_VEL_EPS) || elapsed > JIGGLE_MAX_SEC) {
+    julia.re = clampJuliaComponent(targetRe);
+    julia.im = clampJuliaComponent(targetIm);
+    juliaJiggle = null;
+    syncJuliaHudFromJuliaState();
+    if (pendingTourResumeAfterJiggle) {
+      pendingTourResumeAfterJiggle = false;
+      resumeJuliaLambdaTourAfterLambdaDrag();
+    }
+    invalidateCache();
+    return;
+  }
+
+  syncJuliaHudFromJuliaState();
+  invalidateCache();
 }
 
 function setJuliaCanvasMode(mode) {
@@ -401,6 +809,218 @@ function mandelCanvasModeIsExpDrag() {
   return mandelCanvasMode === "exp";
 }
 
+/** Quantize tour dir to pad cell (−1, 0, +1). */
+function juliaTourPadStep(v) {
+  if (v > 0) return 1;
+  if (v < 0) return -1;
+  return 0;
+}
+
+function juliaTourAxisDeltaLabel(axis, step) {
+  if (step > 0) return `${axis} increasing`;
+  if (step < 0) return `${axis} decreasing`;
+  return `${axis} steady`;
+}
+
+function updateJuliaPathModeButtonsUI() {
+  const rw = juliaTourPathIntent === "randomWalk";
+  juliaPathRandomWalkBtn?.classList.toggle("juliaModeBtnActive", rw);
+  juliaPathRandomWalkBtn?.setAttribute("aria-pressed", rw ? "true" : "false");
+}
+
+/** Lissajous: −1 / 0 / +1 per axis (0 ⇒ λ constant on that axis). */
+function normalizeLissajousDirSign(d) {
+  if (!Number.isFinite(d)) return 1;
+  if (d === 0) return 0;
+  return d > 0 ? 1 : -1;
+}
+
+/** Uniform −1, 0, +1 (e.g. enabling random walk). */
+function randomWalkAxisStepUnconstrained() {
+  const u = Math.random() * 3;
+  if (u < 1) return -1;
+  if (u < 2) return 0;
+  return 1;
+}
+
+/**
+ * Random-walk axis pick: if this axis was idle (0), next is only −1 or +1; else −1, 0, or +1.
+ * @param {number} prev
+ */
+function randomWalkAxisStepFromPrev(prev) {
+  if (prev === 0) return Math.random() < 0.5 ? -1 : 1;
+  const u = Math.random() * 3;
+  if (u < 1) return -1;
+  if (u < 2) return 0;
+  return 1;
+}
+
+/** Auto-rolls never use (0,0): full stop is only via the λ-step pad. */
+function avoidRandomWalkCenterGrid(nextRe, nextIm) {
+  if (nextRe !== 0 || nextIm !== 0) return { re: nextRe, im: nextIm };
+  if (Math.random() < 0.5) {
+    return { re: Math.random() < 0.5 ? -1 : 1, im: 0 };
+  }
+  return { re: 0, im: Math.random() < 0.5 ? -1 : 1 };
+}
+
+function randomWalkNormalizedDir(dre, dim) {
+  const sx = dre ?? 0;
+  const sy = dim ?? 0;
+  const len = Math.hypot(sx, sy);
+  if (len < 1e-15) return { ux: 0, uy: 0, len: 0 };
+  return { ux: sx / len, uy: sy / len, len };
+}
+
+function clearRandomWalkDirBlend(t) {
+  delete t.rwDirBlendRemainSec;
+  delete t.rwBlendMode;
+  delete t.rwBlendFromUx;
+  delete t.rwBlendFromUy;
+  delete t.rwBlendToUx;
+  delete t.rwBlendToUy;
+}
+
+/**
+ * After discrete (dirRe, dirIm) changes, ease motion for `JULIA_RW_DIR_BLEND_SEC` (heading lerp and step scale).
+ * `t` already holds the new dir; `prevRe`/`prevIm` are the old pad steps.
+ * @param {{ rwDirBlendRemainSec?: number; rwBlendMode?: string; dirRe?: number; dirIm?: number }} t
+ * @param {number} prevRe
+ * @param {number} prevIm
+ */
+function startRandomWalkDirBlend(t, prevRe, prevIm) {
+  const from = randomWalkNormalizedDir(prevRe, prevIm);
+  const to = randomWalkNormalizedDir(t.dirRe ?? 0, t.dirIm ?? 0);
+  if (from.len < 1e-15 && to.len < 1e-15) return;
+  const sameDir =
+    from.len > 1e-15 &&
+    to.len > 1e-15 &&
+    Math.abs(from.ux - to.ux) < 1e-8 &&
+    Math.abs(from.uy - to.uy) < 1e-8;
+  if (sameDir) return;
+
+  t.rwDirBlendRemainSec = JULIA_RW_DIR_BLEND_SEC;
+  if (from.len < 1e-15) {
+    t.rwBlendMode = "fromIdle";
+    t.rwBlendToUx = to.ux;
+    t.rwBlendToUy = to.uy;
+  } else if (to.len < 1e-15) {
+    t.rwBlendMode = "toIdle";
+    t.rwBlendFromUx = from.ux;
+    t.rwBlendFromUy = from.uy;
+  } else {
+    t.rwBlendMode = "turn";
+    t.rwBlendFromUx = from.ux;
+    t.rwBlendFromUy = from.uy;
+    t.rwBlendToUx = to.ux;
+    t.rwBlendToUy = to.uy;
+  }
+}
+
+function rollRandomWalkBothAxes(t) {
+  const prevRe = juliaTourPadStep(t.dirRe ?? 0);
+  const prevIm = juliaTourPadStep(t.dirIm ?? 0);
+  let nextRe = randomWalkAxisStepFromPrev(t.dirRe ?? 0);
+  let nextIm = randomWalkAxisStepFromPrev(t.dirIm ?? 0);
+  const adj = avoidRandomWalkCenterGrid(nextRe, nextIm);
+  nextRe = adj.re;
+  nextIm = adj.im;
+  t.dirRe = nextRe;
+  t.dirIm = nextIm;
+  juliaTourDirRe = nextRe;
+  juliaTourDirIm = nextIm;
+  if (prevRe !== nextRe || prevIm !== nextIm) {
+    startRandomWalkDirBlend(t, prevRe, prevIm);
+  }
+  tryStartJuliaJiggleAfterTourDirChange(prevRe, prevIm, nextRe, nextIm);
+  updateJuliaTourControlsUI();
+}
+
+/**
+ * Advance random-walk reroll clock (wall time). Only called when the tour path is advancing (not during
+ * jiggle snap), so rerolls stay aligned with “moving along the path.”
+ * @param {{ rwChoiceAccumMs?: number; paused?: boolean; pathMode?: string }} t
+ * @param {number} dtSec
+ */
+function processRandomWalkDirectionRolls(t, dtSec) {
+  if (t.paused) return;
+  t.rwChoiceAccumMs = (t.rwChoiceAccumMs ?? 0) + dtSec * 1000;
+  while (t.rwChoiceAccumMs >= JULIA_RW_CHOICE_MS) {
+    t.rwChoiceAccumMs -= JULIA_RW_CHOICE_MS;
+    rollRandomWalkBothAxes(t);
+    if (juliaJiggle) break;
+  }
+}
+
+/** Center the Lissajous rectangle on current λ with the largest symmetric half-ranges that fit in ±JULIA_C_LIM. */
+function refreshLissajousTourBoundsFromJulia(t) {
+  const mr = clampJuliaComponent(julia.re);
+  const mi = clampJuliaComponent(julia.im);
+  let halfRe = Math.min(JULIA_C_LIM - mr, mr + JULIA_C_LIM);
+  let halfIm = Math.min(JULIA_C_LIM - mi, mi + JULIA_C_LIM);
+  halfRe = Math.max(JULIA_TOUR_MIN_BOX_HALF, halfRe);
+  halfIm = Math.max(JULIA_TOUR_MIN_BOX_HALF, halfIm);
+  t.reMin = clampJuliaComponent(mr - halfRe);
+  t.reMax = clampJuliaComponent(mr + halfRe);
+  t.imMin = clampJuliaComponent(mi - halfIm);
+  t.imMax = clampJuliaComponent(mi + halfIm);
+}
+
+function randomizeJuliaTourDirQuadrant() {
+  const oldRe = juliaTourPadStep(juliaTourDirRe);
+  const oldIm = juliaTourPadStep(juliaTourDirIm);
+  let a = randomWalkAxisStepUnconstrained();
+  let b = randomWalkAxisStepUnconstrained();
+  const adj = avoidRandomWalkCenterGrid(a, b);
+  a = adj.re;
+  b = adj.im;
+  juliaTourDirRe = a;
+  juliaTourDirIm = b;
+  if (juliaLambdaTour) {
+    juliaLambdaTour.dirRe = a;
+    juliaLambdaTour.dirIm = b;
+  }
+  tryStartJuliaJiggleAfterTourDirChange(oldRe, oldIm, a, b);
+}
+
+/**
+ * Apply path shape intent to HUD and, if a tour is active, its `pathMode` and phase/velocity.
+ * Random walk skips phase resync so λ is not moved by mode changes alone.
+ */
+function setJuliaTourPathIntent(intent) {
+  juliaTourPathIntent = intent;
+  updateJuliaPathModeButtonsUI();
+  if (intent === "lissajous") {
+    juliaTourDirRe = normalizeLissajousDirSign(juliaTourDirRe);
+    juliaTourDirIm = normalizeLissajousDirSign(juliaTourDirIm);
+  }
+  if (juliaLambdaTour) {
+    juliaLambdaTour.pathMode = intent;
+    if (intent === "randomWalk") {
+      juliaLambdaTour.rwChoiceAccumMs = juliaLambdaTour.rwChoiceAccumMs ?? 0;
+    } else {
+      clearRandomWalkDirBlend(juliaLambdaTour);
+      juliaLambdaTour.dirRe = normalizeLissajousDirSign(juliaLambdaTour.dirRe ?? 1);
+      juliaLambdaTour.dirIm = normalizeLissajousDirSign(juliaLambdaTour.dirIm ?? 1);
+      if (intent === "lissajous") {
+        refreshLissajousTourBoundsFromJulia(juliaLambdaTour);
+      }
+      resyncTourPhaseFromJulia();
+    }
+    invalidateCache();
+  }
+  updateJuliaTourControlsUI();
+}
+
+function onJuliaPathRandomWalkClick() {
+  if (juliaTourPathIntent === "randomWalk") {
+    setJuliaTourPathIntent("lissajous");
+  } else {
+    setJuliaTourPathIntent("randomWalk");
+    randomizeJuliaTourDirQuadrant();
+  }
+}
+
 function updateJuliaTourControlsUI() {
   const playing = !!(juliaLambdaTour && !juliaLambdaTour.paused);
   const hasTour = !!juliaLambdaTour;
@@ -418,13 +1038,24 @@ function updateJuliaTourControlsUI() {
     btn.classList.toggle("juliaTourSpeedBtnActive", v === speedActive);
   });
 
-  const dr = juliaLambdaTour?.dirRe ?? juliaTourDirRe;
-  const di = juliaLambdaTour?.dirIm ?? juliaTourDirIm;
-  juliaTourDirReBtn?.setAttribute("aria-pressed", dr < 0 ? "true" : "false");
-  juliaTourDirImBtn?.setAttribute("aria-pressed", di < 0 ? "true" : "false");
+  const dr = juliaTourPadStep(juliaLambdaTour?.dirRe ?? juliaTourDirRe);
+  const di = juliaTourPadStep(juliaLambdaTour?.dirIm ?? juliaTourDirIm);
+
+  juliaTourDirPad?.setAttribute(
+    "aria-label",
+    `λ step pad. Active: ${juliaTourAxisDeltaLabel("Re", dr)}, ${juliaTourAxisDeltaLabel("Im", di)}`,
+  );
+
+  juliaTourDirPad?.querySelectorAll(".juliaTourDirCell").forEach((cell) => {
+    const el = /** @type {HTMLElement} */ (cell);
+    const cr = juliaTourPadStep(Number(el.getAttribute("data-dre")));
+    const ci = juliaTourPadStep(Number(el.getAttribute("data-dim")));
+    el.classList.toggle("juliaTourDirCellActive", cr === dr && ci === di);
+  });
 }
 
 function stopJuliaLambdaTour() {
+  clearJiggleSnapState();
   if (!juliaLambdaTour) return;
   juliaLambdaTour = null;
   syncJuliaHudFromJuliaState();
@@ -432,13 +1063,24 @@ function stopJuliaLambdaTour() {
 }
 
 /**
- * Start or resume the tour from the **current** λ (only internal `phase` is adjusted; `julia` unchanged).
+ * Start or resume the tour from the **current** λ (phase resync for Lissajous; random walk keeps λ until ticks).
  */
 function playJuliaLambdaTourFromUi() {
   if (fractalKind !== 1) return;
+  clearJiggleSnapState();
   if (juliaLambdaTour) {
     if (juliaLambdaTour.paused) {
-      resyncTourPhaseFromJulia();
+      juliaLambdaTour.pathMode = juliaTourPathIntent;
+      if (juliaTourPathIntent === "randomWalk") {
+        juliaLambdaTour.rwChoiceAccumMs = juliaLambdaTour.rwChoiceAccumMs ?? 0;
+      } else {
+        juliaLambdaTour.dirRe = normalizeLissajousDirSign(juliaLambdaTour.dirRe ?? 1);
+        juliaLambdaTour.dirIm = normalizeLissajousDirSign(juliaLambdaTour.dirIm ?? 1);
+        if (juliaTourPathIntent === "lissajous") {
+          refreshLissajousTourBoundsFromJulia(juliaLambdaTour);
+        }
+        resyncTourPhaseFromJulia();
+      }
       juliaLambdaTour.paused = false;
     }
   } else {
@@ -453,8 +1095,15 @@ function playJuliaLambdaTourFromUi() {
       speedMult: juliaTourSpeedMult,
       dirRe: juliaTourDirRe,
       dirIm: juliaTourDirIm,
+      pathMode: juliaTourPathIntent,
+      ...(juliaTourPathIntent === "randomWalk" ? { rwChoiceAccumMs: 0 } : {}),
     };
-    resyncTourPhaseFromJulia();
+    if (juliaTourPathIntent === "lissajous") {
+      refreshLissajousTourBoundsFromJulia(juliaLambdaTour);
+    }
+    if (juliaTourPathIntent !== "randomWalk") {
+      resyncTourPhaseFromJulia();
+    }
   }
   updateJuliaTourControlsUI();
   invalidateCache();
@@ -471,27 +1120,41 @@ function setJuliaTourSpeedMult(mult) {
   juliaTourSpeedMult = mult;
   if (juliaLambdaTour) {
     juliaLambdaTour.speedMult = mult;
-    resyncTourPhaseFromJulia();
+    if (juliaLambdaTour.pathMode !== "randomWalk") {
+      resyncTourPhaseFromJulia();
+    }
     invalidateCache();
   }
   updateJuliaTourControlsUI();
 }
 
-function toggleJuliaTourDirRe() {
-  juliaTourDirRe *= -1;
+/**
+ * @param {number} cellRe
+ * @param {number} cellIm
+ */
+function applyJuliaTourDirFromPadClick(cellRe, cellIm) {
+  const prevRe = juliaTourPadStep(juliaLambdaTour?.dirRe ?? juliaTourDirRe);
+  const prevIm = juliaTourPadStep(juliaLambdaTour?.dirIm ?? juliaTourDirIm);
+  const rw = juliaTourPathIntent === "randomWalk";
+  let re = juliaTourPadStep(cellRe);
+  let im = juliaTourPadStep(cellIm);
+  const changed = prevRe !== re || prevIm !== im;
+  juliaTourDirRe = re;
+  juliaTourDirIm = im;
   if (juliaLambdaTour) {
-    juliaLambdaTour.dirRe *= -1;
-    resyncTourPhaseFromJulia();
-    invalidateCache();
+    juliaLambdaTour.dirRe = re;
+    juliaLambdaTour.dirIm = im;
+    if (changed && rw && juliaLambdaTour.pathMode === "randomWalk") {
+      startRandomWalkDirBlend(juliaLambdaTour, prevRe, prevIm);
+    }
   }
-  updateJuliaTourControlsUI();
-}
-
-function toggleJuliaTourDirIm() {
-  juliaTourDirIm *= -1;
+  if (changed) {
+    tryStartJuliaJiggleAfterTourDirChange(prevRe, prevIm, re, im);
+  }
   if (juliaLambdaTour) {
-    juliaLambdaTour.dirIm *= -1;
-    resyncTourPhaseFromJulia();
+    if (!rw) {
+      resyncTourPhaseFromJulia();
+    }
     invalidateCache();
   }
   updateJuliaTourControlsUI();
@@ -499,15 +1162,29 @@ function toggleJuliaTourDirIm() {
 
 function juliaLambdaTourDPhase() {
   if (!juliaLambdaTour) return 0;
-  const nearOrigin =
-    Math.abs(julia.re) <= JULIA_TOUR_ORIGIN_HALF && Math.abs(julia.im) <= JULIA_TOUR_ORIGIN_HALF;
-  const base =
-    JULIA_TOUR_DPHASE_RAD * (nearOrigin ? JULIA_TOUR_NEAR_ORIGIN_MULT : 1) * juliaLambdaTour.speedMult;
-  return base;
+  return JULIA_TOUR_DPHASE_RAD * juliaLambdaTour.speedMult;
 }
 
-/** @param {number} phi @param {{ reMin: number; reMax: number; imMin: number; imMax: number; dirRe?: number; dirIm?: number }} t */
+/**
+ * @param {number} phi
+ * @param {{
+ *   reMin: number;
+ *   reMax: number;
+ *   imMin: number;
+ *   imMax: number;
+ *   dirRe?: number;
+ *   dirIm?: number;
+ *   pathMode?: "lissajous" | "randomWalk";
+ * }} t
+ */
 function tourLambdaAtPhase(phi, t) {
+  const mode = t.pathMode ?? "lissajous";
+  if (mode === "randomWalk") {
+    return {
+      re: clampJuliaComponent(julia.re),
+      im: clampJuliaComponent(julia.im),
+    };
+  }
   const halfRe = 0.5 * (t.reMax - t.reMin);
   const midRe = 0.5 * (t.reMax + t.reMin);
   const halfIm = 0.5 * (t.imMax - t.imMin);
@@ -528,6 +1205,9 @@ function tourLambdaAtPhase(phi, t) {
 function resyncTourPhaseFromJulia() {
   if (!juliaLambdaTour) return;
   const t = juliaLambdaTour;
+  const mode = t.pathMode ?? "lissajous";
+  if (mode === "randomWalk") return;
+
   const tr = clampJuliaComponent(julia.re);
   const ti = clampJuliaComponent(julia.im);
   const dPhase = juliaLambdaTourDPhase();
@@ -571,22 +1251,141 @@ function resumeJuliaLambdaTourAfterLambdaDrag() {
   if (!juliaLambdaTour?.paused) return;
   juliaLambdaTour.paused = false;
   syncJuliaHudFromJuliaState();
-  resyncTourPhaseFromJulia();
+  const mode = juliaLambdaTour.pathMode ?? "lissajous";
+  if (mode === "randomWalk") {
+    /* keep λ where the user released */
+  } else {
+    if (mode === "lissajous") {
+      refreshLissajousTourBoundsFromJulia(juliaLambdaTour);
+    }
+    resyncTourPhaseFromJulia();
+  }
   updateJuliaTourControlsUI();
   invalidateCache();
 }
 
-/** Advance tour: sin maps phase → [-1,1] with zero derivative at ends (smooth rubber). */
-function tickJuliaLambdaTour() {
+/**
+ * Random walk: motion from current `dirRe`/`dirIm` (−1, 0, +1 per axis). Rerolls are handled by
+ * `processRandomWalkDirectionRolls`. After each discrete dir change, `JULIA_RW_DIR_BLEND_SEC` eases heading
+ * and step scale (short deceleration-style window).
+ * @param {number} dtSec
+ */
+function tickJuliaLambdaTourRandomWalk(t, dtSec) {
+  const dPhase = juliaLambdaTourDPhase();
+  const baseStep = dPhase * JULIA_C_LIM * 2;
+  const dt = Math.max(0, dtSec);
+
+  let ux = 0;
+  let uy = 0;
+  let stepScale = 1;
+  let blending = (t.rwDirBlendRemainSec ?? 0) > 0;
+
+  if (blending) {
+    t.rwDirBlendRemainSec = Math.max(0, (t.rwDirBlendRemainSec ?? 0) - dt);
+    const elapsed = JULIA_RW_DIR_BLEND_SEC - t.rwDirBlendRemainSec;
+    const u = Math.min(1, elapsed / JULIA_RW_DIR_BLEND_SEC);
+    const e = u * u * (3 - 2 * u);
+
+    const mode = t.rwBlendMode;
+    if (mode === "fromIdle") {
+      ux = t.rwBlendToUx ?? 0;
+      uy = t.rwBlendToUy ?? 0;
+      stepScale = e;
+    } else if (mode === "toIdle") {
+      ux = t.rwBlendFromUx ?? 0;
+      uy = t.rwBlendFromUy ?? 0;
+      stepScale = 1 - e;
+    } else {
+      const fx = t.rwBlendFromUx ?? 0;
+      const fy = t.rwBlendFromUy ?? 0;
+      const tx = t.rwBlendToUx ?? 0;
+      const ty = t.rwBlendToUy ?? 0;
+      let bx = fx + (tx - fx) * e;
+      let by = fy + (ty - fy) * e;
+      const blen = Math.hypot(bx, by);
+      if (blen > 1e-15) {
+        ux = bx / blen;
+        uy = by / blen;
+      } else {
+        ux = tx;
+        uy = ty;
+      }
+      stepScale = e * (2 - e);
+    }
+
+    if (t.rwDirBlendRemainSec <= 0) {
+      clearRandomWalkDirBlend(t);
+      blending = false;
+    }
+  }
+
+  if (!blending) {
+    const sx = t.dirRe ?? 0;
+    const sy = t.dirIm ?? 0;
+    const len = Math.hypot(sx, sy);
+    if (len < 1e-15) {
+      juliaTourDirRe = sx;
+      juliaTourDirIm = sy;
+      updateJuliaTourControlsUI();
+      return;
+    }
+    ux = sx / len;
+    uy = sy / len;
+    stepScale = 1;
+  }
+
+  const step = baseStep * stepScale;
+  const dre0 = t.dirRe ?? 0;
+  const dim0 = t.dirIm ?? 0;
+  let re = julia.re + ux * step;
+  let im = julia.im + uy * step;
+  const lim = JULIA_C_LIM;
+  if (re > lim) {
+    re = lim;
+    if ((t.dirRe ?? 0) > 0) t.dirRe = -1;
+  } else if (re < -lim) {
+    re = -lim;
+    if ((t.dirRe ?? 0) < 0) t.dirRe = 1;
+  }
+  if (im > lim) {
+    im = lim;
+    if ((t.dirIm ?? 0) > 0) t.dirIm = -1;
+  } else if (im < -lim) {
+    im = -lim;
+    if ((t.dirIm ?? 0) < 0) t.dirIm = 1;
+  }
+  if ((t.dirRe !== dre0 || t.dirIm !== dim0)) {
+    startRandomWalkDirBlend(t, dre0, dim0);
+  }
+  juliaTourDirRe = t.dirRe ?? 0;
+  juliaTourDirIm = t.dirIm ?? 0;
+  julia.re = clampJuliaComponent(re);
+  julia.im = clampJuliaComponent(im);
+  juliaReLabel.textContent = julia.re.toFixed(6);
+  juliaImLabel.textContent = julia.im.toFixed(6);
+  updateJuliaLambdaWheelVisual();
+  updateJuliaTourControlsUI();
+  invalidateCache();
+}
+
+/** Advance tour: Lissajous or random-walk step. */
+function tickJuliaLambdaTour(dtSec) {
   if (!juliaLambdaTour || fractalKind !== 1) return;
   const t = juliaLambdaTour;
   if (t.paused) return;
-  t.phase += juliaLambdaTourDPhase();
+  const mode = t.pathMode ?? "lissajous";
+  if (mode === "randomWalk") {
+    tickJuliaLambdaTourRandomWalk(t, dtSec);
+    return;
+  }
+  const dPhase = juliaLambdaTourDPhase();
+  t.phase += dPhase;
   const { re, im } = tourLambdaAtPhase(t.phase, t);
   julia.re = re;
   julia.im = im;
   juliaReLabel.textContent = julia.re.toFixed(6);
   juliaImLabel.textContent = julia.im.toFixed(6);
+  updateJuliaLambdaWheelVisual();
   invalidateCache();
 }
 
@@ -599,6 +1398,7 @@ function applyRenderParamsFromInputs() {
   if (!Number.isFinite(julia.re)) julia.re = 0;
   if (!Number.isFinite(julia.im)) julia.im = 0;
   previewJuliaLabelsFromInputs();
+  updateJuliaLambdaWheelVisual();
 }
 
 /** Push HUD inputs into `maxIterUser` / `julia` and schedule a redraw. */
@@ -721,6 +1521,11 @@ function resetToDefaultView() {
   if (fractalKind === 0) {
     mandelExponent = 2;
   }
+  if (fractalKind === 1) {
+    julia.re = clampJuliaComponent(DEFAULT_JULIA_RE);
+    julia.im = clampJuliaComponent(DEFAULT_JULIA_IM);
+    syncJuliaHudFromJuliaState();
+  }
   invalidateCache();
   const ms = fullRenderAndCommit();
   statusEl.textContent = `Reset · ${ms.toFixed(1)} ms`;
@@ -841,8 +1646,20 @@ function frame() {
 
   applyKeyboardPanZoom(dtSec);
 
-  if (juliaLambdaTour && fractalKind === 1) {
-    tickJuliaLambdaTour();
+  tickJuliaJiggleSnap(dtSec);
+
+  /* While jiggle snap is active, λ does not advance along the tour path and random-walk rerolls wait. */
+  const pathAdvances = juliaLambdaTour && fractalKind === 1 && !juliaJiggle;
+  const rwTour =
+    pathAdvances &&
+    !juliaLambdaTour.paused &&
+    (juliaLambdaTour.pathMode ?? "lissajous") === "randomWalk";
+  if (rwTour) {
+    processRandomWalkDirectionRolls(juliaLambdaTour, dtSec);
+  }
+
+  if (pathAdvances) {
+    tickJuliaLambdaTour(dtSec);
   }
 
   const fp = buildFingerprint();
@@ -877,13 +1694,24 @@ uiCanvas.addEventListener("pointerdown", (e) => {
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
   if (fractalKind === 1 && juliaCanvasModeIsLambdaDrag()) {
     rubber = null;
+    clearJiggleSnapState();
     let resumeTourAfter = false;
     if (juliaLambdaTour) {
       resumeTourAfter = !juliaLambdaTour.paused;
       juliaLambdaTour.paused = true;
       updateJuliaTourControlsUI();
     }
-    juliaLambdaDrag = { pointerId: e.pointerId, lastSx: sx, lastSy: sy, resumeTourAfter };
+    juliaLambdaDrag = {
+      pointerId: e.pointerId,
+      lastSx: sx,
+      lastSy: sy,
+      resumeTourAfter,
+      lastMoveT: 0,
+      velRe: 0,
+      velIm: 0,
+      lastDRe: 0,
+      lastDIm: 0,
+    };
     return;
   }
   if (fractalKind === 0 && mandelCanvasModeIsExpDrag()) {
@@ -905,8 +1733,19 @@ uiCanvas.addEventListener("pointermove", (e) => {
     const dy = sy - juliaLambdaDrag.lastSy;
     const mult = e.shiftKey ? JULIA_LAMBDA_SHIFT_MULT : 1;
     const step = JULIA_LAMBDA_PER_CANVAS_PX * mult;
-    julia.re = clampJuliaComponent(julia.re + dx * step);
-    julia.im = clampJuliaComponent(julia.im + dy * step);
+    const dRe = dx * step;
+    const dIm = dy * step;
+    const now = performance.now();
+    if (juliaLambdaDrag.lastMoveT > 0) {
+      const dtSec = Math.max(1e-4, (now - juliaLambdaDrag.lastMoveT) / 1000);
+      juliaLambdaDrag.velRe = dRe / dtSec;
+      juliaLambdaDrag.velIm = dIm / dtSec;
+    }
+    juliaLambdaDrag.lastMoveT = now;
+    juliaLambdaDrag.lastDRe = dRe;
+    juliaLambdaDrag.lastDIm = dIm;
+    julia.re = clampJuliaComponent(julia.re + dRe);
+    julia.im = clampJuliaComponent(julia.im + dIm);
     syncJuliaHudFromJuliaState();
     juliaLambdaDrag.lastSx = sx;
     juliaLambdaDrag.lastSy = sy;
@@ -934,10 +1773,7 @@ uiCanvas.addEventListener("pointerup", (e) => {
 
   if (juliaLambdaDrag) {
     const resumeTour = juliaLambdaDrag.resumeTourAfter;
-    juliaLambdaDrag = null;
-    if (resumeTour) {
-      resumeJuliaLambdaTourAfterLambdaDrag();
-    }
+    endJuliaLambdaDragFromPointer(resumeTour);
     return;
   }
 
@@ -970,10 +1806,11 @@ uiCanvas.addEventListener("pointercancel", (e) => {
   }
   const resumeTour = juliaLambdaDrag?.resumeTourAfter;
   const hadJuliaLambdaDrag = !!juliaLambdaDrag;
-  clearCanvasPointerInteraction();
-  if (hadJuliaLambdaDrag && resumeTour) {
-    resumeJuliaLambdaTourAfterLambdaDrag();
+  rubberPointerId = null;
+  if (hadJuliaLambdaDrag) {
+    endJuliaLambdaDragFromPointer(!!resumeTour);
   }
+  clearCanvasPointerInteraction();
 });
 
 resetViewBtn.addEventListener("click", () => {
@@ -1005,6 +1842,7 @@ fractalSelect.addEventListener("change", () => {
   fractalKind = fk;
   mandelExponent = 2;
   stopJuliaLambdaTour();
+  juliaLambdaWheelDrag = null;
   clearCanvasPointerInteraction();
   updateFractalPanelsVisibility();
   syncParamsFromInputs();
@@ -1026,8 +1864,41 @@ juliaImInput.addEventListener("input", () => {
   syncParamsFromInputs();
 });
 
+juliaLambdaWheel?.addEventListener("pointerdown", (e) => {
+  if (fractalKind !== 1) return;
+  if (e.button != null && e.button !== 0) return;
+  e.preventDefault();
+  stopJuliaLambdaTour();
+  juliaLambdaWheelDrag = {
+    lastMoveT: 0,
+    velRe: 0,
+    velIm: 0,
+    lastDRe: 0,
+    lastDIm: 0,
+  };
+  juliaLambdaWheel.setPointerCapture(e.pointerId);
+  applyJuliaLambdaFromWheelClient(e.clientX, e.clientY);
+});
+
+juliaLambdaWheel?.addEventListener("pointermove", (e) => {
+  if (!juliaLambdaWheel?.hasPointerCapture(e.pointerId)) return;
+  e.preventDefault();
+  applyJuliaLambdaFromWheelClient(e.clientX, e.clientY, { trackVelocity: true });
+});
+
+function releaseJuliaLambdaWheelPointer(e) {
+  if (!juliaLambdaWheel?.hasPointerCapture(e.pointerId)) return;
+  juliaLambdaWheel.releasePointerCapture(e.pointerId);
+  endJuliaLambdaWheelDragFromPointer();
+}
+
+juliaLambdaWheel?.addEventListener("pointerup", releaseJuliaLambdaWheelPointer);
+juliaLambdaWheel?.addEventListener("pointercancel", releaseJuliaLambdaWheelPointer);
+
 juliaModeBoxBtn?.addEventListener("click", () => setJuliaCanvasMode("box"));
 juliaModeLambdaBtn?.addEventListener("click", () => setJuliaCanvasMode("lambda"));
+
+juliaPathRandomWalkBtn?.addEventListener("click", onJuliaPathRandomWalkClick);
 
 juliaTourPlayBtn?.addEventListener("click", () => {
   playJuliaLambdaTourFromUi();
@@ -1037,12 +1908,13 @@ juliaTourPauseBtn?.addEventListener("click", () => {
   pauseJuliaLambdaTourFromUi();
 });
 
-juliaTourDirReBtn?.addEventListener("click", () => {
-  toggleJuliaTourDirRe();
-});
-
-juliaTourDirImBtn?.addEventListener("click", () => {
-  toggleJuliaTourDirIm();
+juliaTourDirPad?.addEventListener("click", (e) => {
+  const btn = e.target?.closest?.(".juliaTourDirCell");
+  if (!btn || !juliaTourDirPad?.contains(btn)) return;
+  const re = Number(btn.getAttribute("data-dre"));
+  const im = Number(btn.getAttribute("data-dim"));
+  if (!Number.isFinite(re) || !Number.isFinite(im)) return;
+  applyJuliaTourDirFromPadClick(re, im);
 });
 
 juliaTourSpeedBtns.forEach((btn) => {
@@ -1051,6 +1923,37 @@ juliaTourSpeedBtns.forEach((btn) => {
     setJuliaTourSpeedMult(v);
   });
 });
+
+juliaJiggleSnapBtn?.addEventListener("click", () => {
+  if (juliaJiggleSnapEnabled) {
+    juliaJiggleSnapEnabled = false;
+    if (juliaJiggle) {
+      julia.re = clampJuliaComponent(juliaJiggle.targetRe);
+      julia.im = clampJuliaComponent(juliaJiggle.targetIm);
+      juliaJiggle = null;
+      syncJuliaHudFromJuliaState();
+      if (pendingTourResumeAfterJiggle) {
+        pendingTourResumeAfterJiggle = false;
+        resumeJuliaLambdaTourAfterLambdaDrag();
+      }
+      invalidateCache();
+    }
+  } else {
+    juliaJiggleSnapEnabled = true;
+  }
+  updateJuliaJiggleSnapToggleUI();
+});
+
+function wireJigglePhysicsSliders() {
+  const onInput = () => {
+    syncJigglePhysicsFromInputs();
+    invalidateCache();
+  };
+  juliaJiggleSpringInput?.addEventListener("input", onInput);
+  juliaJiggleDampingInput?.addEventListener("input", onInput);
+  juliaJiggleCarryInput?.addEventListener("input", onInput);
+  juliaJiggleCapInput?.addEventListener("input", onInput);
+}
 
 mandelModeBoxBtn?.addEventListener("click", () => setMandelCanvasMode("box"));
 mandelModeExpBtn?.addEventListener("click", () => setMandelCanvasMode("exp"));
@@ -1138,7 +2041,11 @@ async function main() {
   updateFractalPanelsVisibility();
   setJuliaCanvasMode("lambda");
   setMandelCanvasMode("box");
+  updateJuliaPathModeButtonsUI();
   updateJuliaTourControlsUI();
+  wireJigglePhysicsSliders();
+  syncJigglePhysicsFromInputs();
+  updateJuliaJiggleSnapToggleUI();
 
   try {
     gpuRenderer = await createFractalGpuRenderer(
