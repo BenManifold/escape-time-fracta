@@ -76,6 +76,10 @@
         overflow-y: auto;
         align-self: stretch;
       }
+      #juliaPanel {
+        width: 100%;
+        box-sizing: border-box;
+      }
       #hud h1 {
         margin: 0 0 8px;
         font-size: 14px;
@@ -186,10 +190,63 @@
       }
       .juliaModeRow {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         gap: 8px;
         margin-top: 8px;
         color: var(--muted);
+      }
+      .juliaSubPanel {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(200, 160, 255, 0.22);
+        background: rgba(48, 36, 64, 0.2);
+      }
+      .juliaSubPanelTitle {
+        margin: 0 0 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        letter-spacing: 0.03em;
+      }
+      .juliaJiggleSnapMainBtn {
+        width: 100%;
+        margin: 0 0 4px;
+        border-radius: 8px;
+      }
+      .juliaJiggleIntro {
+        margin: 0 0 10px;
+        font-size: 11px;
+        line-height: 1.4;
+        color: var(--muted);
+        opacity: 0.92;
+      }
+      .juliaJiggleSliderRow {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-top: 10px;
+      }
+      .juliaJiggleSliderRow:first-of-type {
+        margin-top: 6px;
+      }
+      .juliaJiggleSliderHead {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--text);
+      }
+      .juliaJiggleSliderPlain {
+        font-size: 11px;
+        font-weight: 400;
+        color: var(--muted);
+        line-height: 1.35;
+      }
+      .juliaJiggleSliderRow input[type="range"] {
+        width: 100%;
       }
       .juliaModeRow .juliaModeLabel {
         flex: 0 0 auto;
@@ -278,8 +335,7 @@
         align-items: center;
         gap: 4px;
       }
-      .juliaTourSpeedBtn,
-      .juliaTourDirBtn {
+      .juliaTourSpeedBtn {
         margin: 0;
         padding: 5px 8px;
         border-radius: 6px;
@@ -292,8 +348,7 @@
         cursor: pointer;
         transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
       }
-      .juliaTourSpeedBtn:hover,
-      .juliaTourDirBtn:hover {
+      .juliaTourSpeedBtn:hover {
         background: rgba(255, 255, 255, 0.09);
         color: var(--text);
       }
@@ -302,10 +357,164 @@
         color: var(--accent);
         box-shadow: inset 0 0 0 1px rgba(110, 181, 255, 0.28);
       }
-      .juliaTourDirBtn[aria-pressed="true"] {
-        background: rgba(255, 200, 120, 0.18);
-        color: #ffd9a8;
-        border-color: rgba(255, 200, 120, 0.35);
+      .juliaLambdaPathIntro {
+        margin: 0 0 8px;
+        font-size: 11px;
+        line-height: 1.4;
+        color: var(--muted);
+        opacity: 0.92;
+      }
+      .juliaPathModeRow {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      .juliaPathModeRow .juliaJiggleSnapMainBtn {
+        flex: 1;
+        min-width: 0;
+      }
+      .juliaLambdaWheelRow {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 100%;
+        margin: 14px 0 12px;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      .juliaLambdaWheelLabel {
+        display: block;
+        width: 100%;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        margin: 0 0 10px;
+      }
+      .juliaLambdaWheel {
+        position: relative;
+        width: 100%;
+        max-width: 100%;
+        aspect-ratio: 1;
+        height: auto;
+        flex-shrink: 0;
+        border-radius: 50%;
+        cursor: crosshair;
+        touch-action: none;
+        outline: none;
+        box-shadow:
+          inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+          0 2px 14px rgba(0, 0, 0, 0.45);
+      }
+      .juliaLambdaWheel:focus-visible {
+        box-shadow:
+          inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+          0 0 0 2px rgba(110, 181, 255, 0.55),
+          0 2px 14px rgba(0, 0, 0, 0.45);
+      }
+      .juliaLambdaWheelHue {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background: conic-gradient(
+          hsl(0, 92%, 52%),
+          hsl(45, 92%, 52%),
+          hsl(120, 70%, 48%),
+          hsl(200, 85%, 50%),
+          hsl(265, 80%, 56%),
+          hsl(330, 85%, 52%),
+          hsl(0, 92%, 52%)
+        );
+        pointer-events: none;
+      }
+      .juliaLambdaWheelShade {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background: radial-gradient(
+          circle at 35% 30%,
+          rgba(255, 255, 255, 0.14) 0%,
+          transparent 42%
+        ),
+          radial-gradient(circle at center, rgba(12, 14, 20, 0.5) 0%, rgba(12, 14, 20, 0.08) 58%, transparent 72%);
+        pointer-events: none;
+      }
+      .juliaLambdaWheelTicks {
+        position: absolute;
+        inset: 8px;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        pointer-events: none;
+      }
+      .juliaLambdaWheelCross {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      .juliaLambdaWheelCross::before,
+      .juliaLambdaWheelCross::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        background: rgba(255, 255, 255, 0.16);
+        transform: translate(-50%, -50%);
+      }
+      .juliaLambdaWheelCross::before {
+        width: 1px;
+        height: 72%;
+      }
+      .juliaLambdaWheelCross::after {
+        width: 72%;
+        height: 1px;
+      }
+      .juliaLambdaWheelKnob {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: max(14px, 6%);
+        height: max(14px, 6%);
+        margin: 0;
+        padding: 0;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.92);
+        background: rgba(20, 22, 28, 0.75);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+        pointer-events: none;
+        transform: translate(-50%, -50%);
+        z-index: 2;
+        box-sizing: border-box;
+      }
+      .juliaTourDirPad {
+        display: grid;
+        grid-template-rows: repeat(3, 1fr);
+        grid-template-columns: repeat(3, 1fr);
+        gap: 3px;
+        padding: 4px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(0, 0, 0, 0.2);
+      }
+      .juliaTourDirCell {
+        width: 22px;
+        height: 22px;
+        margin: 0;
+        padding: 0;
+        border-radius: 4px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.06);
+        cursor: pointer;
+        transition: background 0.12s ease, box-shadow 0.12s ease;
+      }
+      .juliaTourDirCell:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+      .juliaTourDirCell.juliaTourDirCellActive {
+        background: rgba(95, 214, 138, 0.35);
+        box-shadow: inset 0 0 0 1px rgba(95, 214, 138, 0.55);
       }
       #status {
         margin-top: 8px;
@@ -372,6 +581,51 @@
               </button>
             </div>
           </div>
+          <div class="juliaSubPanel" role="group" aria-labelledby="juliaJigglePanelTitle">
+            <h2 class="juliaSubPanelTitle" id="juliaJigglePanelTitle">Elastic release (λ drag)</h2>
+            <p class="juliaJiggleIntro">After you let go on the canvas, λ can overshoot and settle like soft jello. Tune the feel below.</p>
+            <button
+              type="button"
+              class="juliaModeBtn juliaModeBtnActive juliaJiggleSnapMainBtn"
+              id="juliaJiggleSnapBtn"
+              aria-pressed="true"
+              title="Turn elastic settle on or off"
+            >
+              Jiggle snap
+            </button>
+            <div class="juliaJiggleSliderRow">
+              <div class="juliaJiggleSliderHead">
+                <span>Pull-back strength</span>
+                <span id="juliaJiggleSpringVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+              </div>
+              <span class="juliaJiggleSliderPlain">How strongly λ is drawn toward where you released.</span>
+              <input type="range" id="juliaJiggleSpring" min="40" max="320" step="5" value="265" />
+            </div>
+            <div class="juliaJiggleSliderRow">
+              <div class="juliaJiggleSliderHead">
+                <span>Wobble damping</span>
+                <span id="juliaJiggleDampingVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+              </div>
+              <span class="juliaJiggleSliderPlain">Higher values calm the bounce faster (more friction).</span>
+              <input type="range" id="juliaJiggleDamping" min="4" max="55" step="1" value="9" />
+            </div>
+            <div class="juliaJiggleSliderRow">
+              <div class="juliaJiggleSliderHead">
+                <span>Release carry</span>
+                <span id="juliaJiggleCarryVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+              </div>
+              <span class="juliaJiggleSliderPlain">How much of your drag speed feeds the first wobble.</span>
+              <input type="range" id="juliaJiggleCarry" min="5" max="50" step="1" value="30" title="Displayed as tenths (3.0 = 30)" />
+            </div>
+            <div class="juliaJiggleSliderRow">
+              <div class="juliaJiggleSliderHead">
+                <span>Max wobble speed</span>
+                <span id="juliaJiggleCapVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+              </div>
+              <span class="juliaJiggleSliderPlain">Caps how fast λ can move during the settle (per axis).</span>
+              <input type="range" id="juliaJiggleCap" min="12" max="96" step="2" value="70" />
+            </div>
+          </div>
           <label>
             Julia Re <span id="juliaReLabel"></span>
             <input
@@ -396,38 +650,82 @@
               title="λ Im in [−2, 2], full precision"
             />
           </label>
-          <div class="juliaTourBar" role="group" aria-label="Julia lambda tour">
-            <div class="juliaTourTransport">
-              <button type="button" class="juliaTourIconBtn" id="juliaTourPlay" title="Play" aria-label="Play tour">
-                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-                  <polygon points="2,1 13,7 2,13" fill="currentColor" />
-                </svg>
-              </button>
-              <button type="button" class="juliaTourIconBtn" id="juliaTourPause" title="Pause" aria-label="Pause tour">
-                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-                  <rect x="2" y="2" width="3.5" height="10" fill="currentColor" />
-                  <rect x="8.5" y="2" width="3.5" height="10" fill="currentColor" />
-                </svg>
+          <div class="juliaLambdaWheelRow">
+            <span class="juliaLambdaWheelLabel" id="juliaLambdaWheelLabel">λ disk</span>
+            <div
+              class="juliaLambdaWheel"
+              id="juliaLambdaWheel"
+              role="slider"
+              aria-labelledby="juliaLambdaWheelLabel"
+              aria-valuetext=""
+              tabindex="0"
+              title="Drag in the disk: horizontal → Re, vertical → Im (up = +Im). Center = 0; rim ≈ ±2. Stops the λ tour. With jiggle snap on, release can settle like canvas λ-drag (disabled only while a random-walk λ tour is playing)."
+            >
+              <div class="juliaLambdaWheelHue" aria-hidden="true"></div>
+              <div class="juliaLambdaWheelShade" aria-hidden="true"></div>
+              <div class="juliaLambdaWheelTicks" aria-hidden="true"></div>
+              <div class="juliaLambdaWheelCross" aria-hidden="true"></div>
+              <div class="juliaLambdaWheelKnob" id="juliaLambdaWheelKnob"></div>
+            </div>
+          </div>
+          <div class="juliaSubPanel" role="group" aria-labelledby="juliaLambdaPathTitle">
+            <h2 class="juliaSubPanelTitle" id="juliaLambdaPathTitle">Lambda path</h2>
+            <p class="juliaLambdaPathIntro">Default Lissajous box sweep; optional random walk.</p>
+            <div class="juliaPathModeRow" role="group" aria-label="Random walk path">
+              <button
+                type="button"
+                class="juliaModeBtn juliaJiggleSnapMainBtn"
+                id="juliaPathRandomWalk"
+                aria-pressed="false"
+                title="Toggle random walk: each axis moves −1, 0, or +1; rerolls every 5 s (pad shows live steps)."
+              >
+                Random walk
               </button>
             </div>
-            <div class="juliaTourSpeedGroup" role="group" aria-label="Tour speed">
-              <span class="juliaTourMiniLabel">Speed</span>
-              <button type="button" class="juliaTourSpeedBtn" data-speed="200" title="200× (fast)">200×</button>
-              <button type="button" class="juliaTourSpeedBtn" data-speed="100" title="100×">100×</button>
-              <button type="button" class="juliaTourSpeedBtn" data-speed="50" title="50×">50×</button>
-              <button type="button" class="juliaTourSpeedBtn" data-speed="10" title="10×">10×</button>
-              <button type="button" class="juliaTourSpeedBtn juliaTourSpeedBtnActive" data-speed="1" title="1× slowest (finest)">
-                1×
-              </button>
-            </div>
-            <div class="juliaTourDirGroup" role="group" aria-label="Reverse sweep direction per component">
-              <span class="juliaTourMiniLabel">λ dir</span>
-              <button type="button" class="juliaTourDirBtn" id="juliaTourDirRe" aria-pressed="false" title="Reverse real component">
-                Re
-              </button>
-              <button type="button" class="juliaTourDirBtn" id="juliaTourDirIm" aria-pressed="false" title="Reverse imaginary component">
-                Im
-              </button>
+            <div class="juliaTourBar" role="group" aria-label="Julia lambda tour">
+              <div class="juliaTourTransport">
+                <button type="button" class="juliaTourIconBtn" id="juliaTourPlay" title="Play" aria-label="Play tour">
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                    <polygon points="2,1 13,7 2,13" fill="currentColor" />
+                  </svg>
+                </button>
+                <button type="button" class="juliaTourIconBtn" id="juliaTourPause" title="Pause" aria-label="Pause tour">
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                    <rect x="2" y="2" width="3.5" height="10" fill="currentColor" />
+                    <rect x="8.5" y="2" width="3.5" height="10" fill="currentColor" />
+                  </svg>
+                </button>
+              </div>
+              <div class="juliaTourSpeedGroup" role="group" aria-label="Tour speed">
+                <span class="juliaTourMiniLabel">Speed</span>
+                <button type="button" class="juliaTourSpeedBtn" data-speed="200" title="200× (fast)">200×</button>
+                <button type="button" class="juliaTourSpeedBtn" data-speed="100" title="100×">100×</button>
+                <button type="button" class="juliaTourSpeedBtn" data-speed="50" title="50×">50×</button>
+                <button type="button" class="juliaTourSpeedBtn" data-speed="10" title="10×">10×</button>
+                <button type="button" class="juliaTourSpeedBtn juliaTourSpeedBtnActive" data-speed="1" title="1× slowest (finest)">
+                  1×
+                </button>
+              </div>
+              <div class="juliaTourDirGroup" role="group" aria-labelledby="juliaTourDirPadLabel">
+                <span class="juliaTourMiniLabel" id="juliaTourDirPadLabel">λ step</span>
+                <div
+                  class="juliaTourDirPad"
+                  id="juliaTourDirPad"
+                  role="grid"
+                  aria-label="λ movement per axis: columns Re −, 0, +; rows Im +, 0, −"
+                  title="One cell shows (ΔRe, ΔIm): −1, 0, or +1 each. Random walk rerolls every 5 s; click a cell to set manually."
+                >
+                  <button type="button" class="juliaTourDirCell" data-dre="-1" data-dim="1" aria-label="Re decreasing, Im increasing" />
+                  <button type="button" class="juliaTourDirCell" data-dre="0" data-dim="1" aria-label="Re steady, Im increasing" />
+                  <button type="button" class="juliaTourDirCell" data-dre="1" data-dim="1" aria-label="Re increasing, Im increasing" />
+                  <button type="button" class="juliaTourDirCell" data-dre="-1" data-dim="0" aria-label="Re decreasing, Im steady" />
+                  <button type="button" class="juliaTourDirCell" data-dre="0" data-dim="0" aria-label="Re steady, Im steady" />
+                  <button type="button" class="juliaTourDirCell" data-dre="1" data-dim="0" aria-label="Re increasing, Im steady" />
+                  <button type="button" class="juliaTourDirCell" data-dre="-1" data-dim="-1" aria-label="Re decreasing, Im decreasing" />
+                  <button type="button" class="juliaTourDirCell" data-dre="0" data-dim="-1" aria-label="Re steady, Im decreasing" />
+                  <button type="button" class="juliaTourDirCell" data-dre="1" data-dim="-1" aria-label="Re increasing, Im decreasing" />
+                </div>
+              </div>
             </div>
           </div>
         </div>
