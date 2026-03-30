@@ -54,7 +54,9 @@ const JULIA_TOUR_RESYNC_PHI_MAX = 3000 * Math.PI
 const JULIA_TOUR_MIN_BOX_HALF = 0.02
 
 /** Random-walk: ms between independent Re/Im step picks (−1, 0, +1 per axis). */
-const JULIA_RW_CHOICE_MS = 5000
+const JULIA_RW_CHOICE_MS = 5000;
+/** Random-walk: seconds to ease heading / step magnitude after a discrete direction change. */
+const JULIA_RW_DIR_BLEND_SEC = 0.15;
 
 /** Mandelbrot multibrot z^p + c: Δp per backing-store pixel (horizontal drag). */
 const MANDEL_EXP_PER_CANVAS_PX = 0.006;
@@ -266,6 +268,12 @@ let mandelExpDrag = null;
  *   dirIm: number;
  *   pathMode: "lissajous" | "randomWalk";
  *   rwChoiceAccumMs?: number;
+ *   rwDirBlendRemainSec?: number;
+ *   rwBlendMode?: "turn" | "fromIdle" | "toIdle";
+ *   rwBlendFromUx?: number;
+ *   rwBlendFromUy?: number;
+ *   rwBlendToUx?: number;
+ *   rwBlendToUy?: number;
  * } | null}
  */
 let juliaLambdaTour = null;
@@ -845,15 +853,83 @@ function randomWalkAxisStepFromPrev(prev) {
   return 1;
 }
 
+/** Auto-rolls never use (0,0): full stop is only via the λ-step pad. */
+function avoidRandomWalkCenterGrid(nextRe, nextIm) {
+  if (nextRe !== 0 || nextIm !== 0) return { re: nextRe, im: nextIm };
+  if (Math.random() < 0.5) {
+    return { re: Math.random() < 0.5 ? -1 : 1, im: 0 };
+  }
+  return { re: 0, im: Math.random() < 0.5 ? -1 : 1 };
+}
+
+function randomWalkNormalizedDir(dre, dim) {
+  const sx = dre ?? 0;
+  const sy = dim ?? 0;
+  const len = Math.hypot(sx, sy);
+  if (len < 1e-15) return { ux: 0, uy: 0, len: 0 };
+  return { ux: sx / len, uy: sy / len, len };
+}
+
+function clearRandomWalkDirBlend(t) {
+  delete t.rwDirBlendRemainSec;
+  delete t.rwBlendMode;
+  delete t.rwBlendFromUx;
+  delete t.rwBlendFromUy;
+  delete t.rwBlendToUx;
+  delete t.rwBlendToUy;
+}
+
+/**
+ * After discrete (dirRe, dirIm) changes, ease motion for `JULIA_RW_DIR_BLEND_SEC` (heading lerp and step scale).
+ * `t` already holds the new dir; `prevRe`/`prevIm` are the old pad steps.
+ * @param {{ rwDirBlendRemainSec?: number; rwBlendMode?: string; dirRe?: number; dirIm?: number }} t
+ * @param {number} prevRe
+ * @param {number} prevIm
+ */
+function startRandomWalkDirBlend(t, prevRe, prevIm) {
+  const from = randomWalkNormalizedDir(prevRe, prevIm);
+  const to = randomWalkNormalizedDir(t.dirRe ?? 0, t.dirIm ?? 0);
+  if (from.len < 1e-15 && to.len < 1e-15) return;
+  const sameDir =
+    from.len > 1e-15 &&
+    to.len > 1e-15 &&
+    Math.abs(from.ux - to.ux) < 1e-8 &&
+    Math.abs(from.uy - to.uy) < 1e-8;
+  if (sameDir) return;
+
+  t.rwDirBlendRemainSec = JULIA_RW_DIR_BLEND_SEC;
+  if (from.len < 1e-15) {
+    t.rwBlendMode = "fromIdle";
+    t.rwBlendToUx = to.ux;
+    t.rwBlendToUy = to.uy;
+  } else if (to.len < 1e-15) {
+    t.rwBlendMode = "toIdle";
+    t.rwBlendFromUx = from.ux;
+    t.rwBlendFromUy = from.uy;
+  } else {
+    t.rwBlendMode = "turn";
+    t.rwBlendFromUx = from.ux;
+    t.rwBlendFromUy = from.uy;
+    t.rwBlendToUx = to.ux;
+    t.rwBlendToUy = to.uy;
+  }
+}
+
 function rollRandomWalkBothAxes(t) {
   const prevRe = juliaTourPadStep(t.dirRe ?? 0);
   const prevIm = juliaTourPadStep(t.dirIm ?? 0);
-  const nextRe = randomWalkAxisStepFromPrev(t.dirRe ?? 0);
-  const nextIm = randomWalkAxisStepFromPrev(t.dirIm ?? 0);
+  let nextRe = randomWalkAxisStepFromPrev(t.dirRe ?? 0);
+  let nextIm = randomWalkAxisStepFromPrev(t.dirIm ?? 0);
+  const adj = avoidRandomWalkCenterGrid(nextRe, nextIm);
+  nextRe = adj.re;
+  nextIm = adj.im;
   t.dirRe = nextRe;
   t.dirIm = nextIm;
   juliaTourDirRe = nextRe;
   juliaTourDirIm = nextIm;
+  if (prevRe !== nextRe || prevIm !== nextIm) {
+    startRandomWalkDirBlend(t, prevRe, prevIm);
+  }
   tryStartJuliaJiggleAfterTourDirChange(prevRe, prevIm, nextRe, nextIm);
   updateJuliaTourControlsUI();
 }
@@ -891,8 +967,11 @@ function refreshLissajousTourBoundsFromJulia(t) {
 function randomizeJuliaTourDirQuadrant() {
   const oldRe = juliaTourPadStep(juliaTourDirRe);
   const oldIm = juliaTourPadStep(juliaTourDirIm);
-  const a = randomWalkAxisStepUnconstrained();
-  const b = randomWalkAxisStepUnconstrained();
+  let a = randomWalkAxisStepUnconstrained();
+  let b = randomWalkAxisStepUnconstrained();
+  const adj = avoidRandomWalkCenterGrid(a, b);
+  a = adj.re;
+  b = adj.im;
   juliaTourDirRe = a;
   juliaTourDirIm = b;
   if (juliaLambdaTour) {
@@ -918,6 +997,7 @@ function setJuliaTourPathIntent(intent) {
     if (intent === "randomWalk") {
       juliaLambdaTour.rwChoiceAccumMs = juliaLambdaTour.rwChoiceAccumMs ?? 0;
     } else {
+      clearRandomWalkDirBlend(juliaLambdaTour);
       juliaLambdaTour.dirRe = normalizeLissajousDirSign(juliaLambdaTour.dirRe ?? 1);
       juliaLambdaTour.dirIm = normalizeLissajousDirSign(juliaLambdaTour.dirIm ?? 1);
       if (intent === "lissajous") {
@@ -1066,6 +1146,9 @@ function applyJuliaTourDirFromPadClick(cellRe, cellIm) {
   if (juliaLambdaTour) {
     juliaLambdaTour.dirRe = re;
     juliaLambdaTour.dirIm = im;
+    if (changed && rw && juliaLambdaTour.pathMode === "randomWalk") {
+      startRandomWalkDirBlend(juliaLambdaTour, prevRe, prevIm);
+    }
   }
   if (changed) {
     tryStartJuliaJiggleAfterTourDirChange(prevRe, prevIm, re, im);
@@ -1185,24 +1268,79 @@ function resumeJuliaLambdaTourAfterLambdaDrag() {
 
 /**
  * Random walk: motion from current `dirRe`/`dirIm` (−1, 0, +1 per axis). Rerolls are handled by
- * `processRandomWalkDirectionRolls` so the timer still advances during jiggle snap.
+ * `processRandomWalkDirectionRolls`. After each discrete dir change, `JULIA_RW_DIR_BLEND_SEC` eases heading
+ * and step scale (short deceleration-style window).
+ * @param {number} dtSec
  */
-function tickJuliaLambdaTourRandomWalk(t) {
+function tickJuliaLambdaTourRandomWalk(t, dtSec) {
   const dPhase = juliaLambdaTourDPhase();
-  const step = dPhase * JULIA_C_LIM * 2;
-  const sx = t.dirRe ?? 0;
-  const sy = t.dirIm ?? 0;
-  const len = Math.hypot(sx, sy);
+  const baseStep = dPhase * JULIA_C_LIM * 2;
+  const dt = Math.max(0, dtSec);
 
-  if (len < 1e-15) {
-    juliaTourDirRe = sx;
-    juliaTourDirIm = sy;
-    updateJuliaTourControlsUI();
-    return;
+  let ux = 0;
+  let uy = 0;
+  let stepScale = 1;
+  let blending = (t.rwDirBlendRemainSec ?? 0) > 0;
+
+  if (blending) {
+    t.rwDirBlendRemainSec = Math.max(0, (t.rwDirBlendRemainSec ?? 0) - dt);
+    const elapsed = JULIA_RW_DIR_BLEND_SEC - t.rwDirBlendRemainSec;
+    const u = Math.min(1, elapsed / JULIA_RW_DIR_BLEND_SEC);
+    const e = u * u * (3 - 2 * u);
+
+    const mode = t.rwBlendMode;
+    if (mode === "fromIdle") {
+      ux = t.rwBlendToUx ?? 0;
+      uy = t.rwBlendToUy ?? 0;
+      stepScale = e;
+    } else if (mode === "toIdle") {
+      ux = t.rwBlendFromUx ?? 0;
+      uy = t.rwBlendFromUy ?? 0;
+      stepScale = 1 - e;
+    } else {
+      const fx = t.rwBlendFromUx ?? 0;
+      const fy = t.rwBlendFromUy ?? 0;
+      const tx = t.rwBlendToUx ?? 0;
+      const ty = t.rwBlendToUy ?? 0;
+      let bx = fx + (tx - fx) * e;
+      let by = fy + (ty - fy) * e;
+      const blen = Math.hypot(bx, by);
+      if (blen > 1e-15) {
+        ux = bx / blen;
+        uy = by / blen;
+      } else {
+        ux = tx;
+        uy = ty;
+      }
+      stepScale = e * (2 - e);
+    }
+
+    if (t.rwDirBlendRemainSec <= 0) {
+      clearRandomWalkDirBlend(t);
+      blending = false;
+    }
   }
 
-  let re = julia.re + (sx / len) * step;
-  let im = julia.im + (sy / len) * step;
+  if (!blending) {
+    const sx = t.dirRe ?? 0;
+    const sy = t.dirIm ?? 0;
+    const len = Math.hypot(sx, sy);
+    if (len < 1e-15) {
+      juliaTourDirRe = sx;
+      juliaTourDirIm = sy;
+      updateJuliaTourControlsUI();
+      return;
+    }
+    ux = sx / len;
+    uy = sy / len;
+    stepScale = 1;
+  }
+
+  const step = baseStep * stepScale;
+  const dre0 = t.dirRe ?? 0;
+  const dim0 = t.dirIm ?? 0;
+  let re = julia.re + ux * step;
+  let im = julia.im + uy * step;
   const lim = JULIA_C_LIM;
   if (re > lim) {
     re = lim;
@@ -1217,6 +1355,9 @@ function tickJuliaLambdaTourRandomWalk(t) {
   } else if (im < -lim) {
     im = -lim;
     if ((t.dirIm ?? 0) < 0) t.dirIm = 1;
+  }
+  if ((t.dirRe !== dre0 || t.dirIm !== dim0)) {
+    startRandomWalkDirBlend(t, dre0, dim0);
   }
   juliaTourDirRe = t.dirRe ?? 0;
   juliaTourDirIm = t.dirIm ?? 0;
@@ -1236,7 +1377,7 @@ function tickJuliaLambdaTour(dtSec) {
   if (t.paused) return;
   const mode = t.pathMode ?? "lissajous";
   if (mode === "randomWalk") {
-    tickJuliaLambdaTourRandomWalk(t);
+    tickJuliaLambdaTourRandomWalk(t, dtSec);
     return;
   }
   const dPhase = juliaLambdaTourDPhase();
