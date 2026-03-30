@@ -607,12 +607,13 @@ function syncJigglePhysicsFromInputs() {
   updateJiggleParamValueLabels();
 }
 
-/** No elastic jiggle while random-walk path is selected or the tour is in random-walk mode. */
+/**
+ * Elastic jiggle fights discrete random-walk stepping; skip only while that path is **actively playing**.
+ * Random-walk as HUD intent alone, or a paused RW tour, must not disable λ-drag / λ-disk release jiggle.
+ */
 function juliaJiggleDisabledForRandomWalk() {
-  return (
-    juliaTourPathIntent === "randomWalk" ||
-    (juliaLambdaTour?.pathMode ?? "lissajous") === "randomWalk"
-  );
+  const t = juliaLambdaTour;
+  return !!t && !t.paused && (t.pathMode ?? "lissajous") === "randomWalk";
 }
 
 /**
@@ -827,9 +828,10 @@ function updateJuliaPathModeButtonsUI() {
   juliaPathRandomWalkBtn?.setAttribute("aria-pressed", rw ? "true" : "false");
 }
 
-/** Lissajous sweep uses ±1 only. */
+/** Lissajous: −1 / 0 / +1 per axis (0 ⇒ λ constant on that axis). */
 function normalizeLissajousDirSign(d) {
-  if (d === 0 || !Number.isFinite(d)) return 1;
+  if (!Number.isFinite(d)) return 1;
+  if (d === 0) return 0;
   return d > 0 ? 1 : -1;
 }
 
@@ -1136,10 +1138,6 @@ function applyJuliaTourDirFromPadClick(cellRe, cellIm) {
   const rw = juliaTourPathIntent === "randomWalk";
   let re = juliaTourPadStep(cellRe);
   let im = juliaTourPadStep(cellIm);
-  if (!rw) {
-    re = re === 0 ? 1 : re;
-    im = im === 0 ? 1 : im;
-  }
   const changed = prevRe !== re || prevIm !== im;
   juliaTourDirRe = re;
   juliaTourDirIm = im;
