@@ -52,9 +52,9 @@ pub fn fill_smooth_palette_lut(
     }
 }
 
-/// `fractal_kind`: 0 Mandelbrot, 1 Julia, 2 Burning Ship, 3 Tricorn.
+/// `fractal_kind`: 0 Mandelbrot, 1 Julia, 2 Burning Ship (other values treated as Mandelbrot).
 /// `palette_id`: 0 Nebula, 1 Flotilla, 2 Classic cosine, 3 Grayscale, 4 Ghost ship (Wiki-style palette).
-/// `perturb_mode`: 0 off, 1 on (Mandelbrot only), 2 auto (`half_w` &lt; threshold).
+/// `perturb_mode`: 0 off, 1 on (Mandelbrot only), 2 auto (`half_w` &lt; `perturb::PERTURB_AUTO_HALF_W`).
 #[wasm_bindgen]
 pub fn render_rgba(
     out_ptr: *mut u8,
@@ -141,17 +141,12 @@ pub fn probe_escape_iter(
             return n;
         }
 
-        let (zr_n, zi_n) = match fractal_kind {
-            2 => {
-                let azr = zr.abs();
-                let azi = zi.abs();
-                (azr * azr - azi * azi + cr, 2.0 * azr * azi + ci)
-            }
-            3 => {
-                let zrc = -zi;
-                (zr * zr - zrc * zrc + cr, 2.0 * zr * zrc + ci)
-            }
-            _ => (zr * zr - zi * zi + cr, 2.0 * zr * zi + ci),
+        let (zr_n, zi_n) = if fractal_kind == 2 {
+            let azr = zr.abs();
+            let azi = zi.abs();
+            (azr * azr - azi * azi + cr, 2.0 * azr * azi + ci)
+        } else {
+            (zr * zr - zi * zi + cr, 2.0 * zr * zi + ci)
         };
         zr = zr_n;
         zi = zi_n;
@@ -228,17 +223,12 @@ pub(crate) fn escape_scalar_f64(
             return palette_f64(smooth, palette_id);
         }
 
-        let (zr_n, zi_n) = match fractal_kind {
-            2 => {
-                let azr = zr.abs();
-                let azi = zi.abs();
-                (azr * azr - azi * azi + cr, 2.0 * azr * azi + ci)
-            }
-            3 => {
-                let zrc = -zi;
-                (zr * zr - zrc * zrc + cr, 2.0 * zr * zrc + ci)
-            }
-            _ => (zr * zr - zi * zi + cr, 2.0 * zr * zi + ci),
+        let (zr_n, zi_n) = if fractal_kind == 2 {
+            let azr = zr.abs();
+            let azi = zi.abs();
+            (azr * azr - azi * azi + cr, 2.0 * azr * azi + ci)
+        } else {
+            (zr * zr - zi * zi + cr, 2.0 * zr * zi + ci)
         };
         zr = zr_n;
         zi = zi_n;

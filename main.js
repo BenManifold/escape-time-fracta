@@ -2,6 +2,7 @@ import init, {
   alloc,
   dealloc,
   fill_smooth_palette_lut,
+  render_rgba,
 } from "./fractal-wasm/pkg/fractal_wasm.js";
 import { createFractalGpuRenderer, webGpuSupported } from "./fractal-webgpu.js";
 
@@ -18,12 +19,11 @@ const KEY_ZOOM_LOG_PER_SEC = 0.62;
 const KEYBOARD_HALF_W_MIN = 1e-16;
 const KEYBOARD_HALF_W_MAX = 96;
 
-const DEEP_ZOOM_DURATION_MS = 20 * 60 * 1000;
-/** Fixed deep-zoom target in the complex plane (re, im). */
-const DEEP_ZOOM_TARGET_RE = 0;
-const DEEP_ZOOM_TARGET_IM = 1;
-/** Deep-zoom animation stops here (“At zoom limit”); still beyond comfortable f32 accuracy for fine structure. */
-const DEEP_ZOOM_HALF_W_MIN = 1e-13;
+/**
+ * Below this Re half-width, use WASM render_rgba (f64 pixel map). Mandelbrot uses tiled perturb there when
+ * half_w &lt; 0.02 (see fractal-wasm perturb). ~5e-5 → zoom ×4e4 from default half-w 2 (before ~1e5 f32 blocks).
+ */
+const WASM_F64_HALF_W = 5e-5;
 
 const MAX_ITER_MIN = 32;
 const MAX_ITER_MAX = 8192;
@@ -48,8 +48,6 @@ const juliaReLabel = document.getElementById("juliaReLabel");
 const juliaImLabel = document.getElementById("juliaImLabel");
 const nextPresetBtn = document.getElementById("nextPreset");
 const resetViewBtn = document.getElementById("resetView");
-const deepZoomBtn = document.getElementById("deepZoom");
-const applyParamsBtn = document.getElementById("applyParams");
 const paletteSelect = document.getElementById("palette");
 
 /** @type {Array<Array<{ centerX: number; centerY: number; halfW: number }>>} */
@@ -85,6 +83,18 @@ const presetRound = { 0: 0, 1: 0, 2: 0, 3: 0 };
 
 let wasmMemory;
 
+/** Last `presentCpuRgba` time after an off-thread WASM render (main thread stays responsive during `render_rgba`). */
+let lastWasmPresentMs = 0;
+
+/** @type {Worker | null} */
+let wasmRenderWorker = null;
+/** If worker creation or runtime fails, keep using synchronous WASM render on the main thread. */
+let wasmRenderSyncFallback = false;
+let wasmRenderSeq = 0;
+let wasmRenderInFlight = false;
+/** @type {ReturnType<typeof buildWasmRenderJob> | null} */
+let wasmRenderPending = null;
+
 /**
  * @type {{
  *   drawFull: (p: object, o?: object) => number;
@@ -106,28 +116,17 @@ const julia = {
 };
 
 let maxIterUser = clampMaxIter(Number(maxIterInput.value));
-let fractalKind = Number(fractalSelect.value);
+let fractalKind = (() => {
+  let fk = Number(fractalSelect.value);
+  if (fk === 3 || !Number.isFinite(fk)) fk = 0;
+  fractalSelect.value = String(fk);
+  return fk;
+})();
 
 let cacheFingerprint = "";
 /** @type {{ centerX: number; centerY: number; halfW: number }} */
 let committedView = { centerX: 0, centerY: 0, halfW: 0 };
 let cacheReady = false;
-
-/**
- * @typedef {{
- *   t0: number;
- *   startCX: number;
- *   startCY: number;
- *   startHalfW: number;
- *   targetX: number;
- *   targetY: number;
- *   endHalfW: number;
- *   startMaxIter: number;
- *   endMaxIter: number;
- * }} DeepZoomState
- * @type {DeepZoomState | null}
- */
-let deepZoom = null;
 
 /** @type {{ x0: number; y0: number; x1: number; y1: number } | null} */
 let rubber = null;
@@ -200,7 +199,7 @@ function clearKeysPanZoom() {
  * @returns {boolean} true if `view` changed
  */
 function applyKeyboardPanZoom(dtSec) {
-  if (!gpuRenderer || deepZoom || dtSec <= 0) return false;
+  if (!gpuRenderer || dtSec <= 0) return false;
   const k = keysPanZoom;
   if (!k.left && !k.right && !k.up && !k.down && !k.zoomIn && !k.zoomOut) return false;
 
@@ -292,6 +291,12 @@ function applyRenderParamsFromInputs() {
   previewJuliaLabelsFromInputs();
 }
 
+/** Push HUD inputs into `maxIterUser` / `julia` and schedule a redraw. */
+function syncParamsFromInputs() {
+  applyRenderParamsFromInputs();
+  invalidateCache();
+}
+
 function updateJuliaPanelVisibility() {
   juliaPanel.hidden = fractalKind !== 1;
 }
@@ -299,69 +304,27 @@ function updateJuliaPanelVisibility() {
 function buildFingerprint() {
   const cw = canvas.width;
   const ch = canvas.height;
-  const iterKey = deepZoom ? deepZoomEffectiveMaxIter() : maxIterUser;
-  return `${cw}x${ch}|${fractalKind}|${iterKey}|${julia.re}|${julia.im}|p${currentPaletteId()}`;
+  const jKey = fractalKind === 1 ? `|${julia.re}|${julia.im}` : "";
+  return `${cw}x${ch}|${fractalKind}|${maxIterUser}${jKey}|p${currentPaletteId()}`;
 }
 
 function viewsEqual(a, b) {
   return a.centerX === b.centerX && a.centerY === b.centerY && a.halfW === b.halfW;
 }
 
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-/** @param {number} t */
-function smoothstep01(t) {
-  const x = Math.min(1, Math.max(0, t));
-  return x * x * (3 - 2 * x);
-}
-
-/**
- * @param {DeepZoomState} dz
- * @param {number} halfW
- */
-function deepZoomIterForHalfW(dz, halfW) {
-  const l0 = Math.log(dz.startHalfW);
-  const l1 = Math.log(dz.endHalfW);
-  const lh = Math.log(Math.max(halfW, dz.endHalfW));
-  let u = (lh - l0) / (l1 - l0);
-  if (!Number.isFinite(u)) u = 1;
-  u = Math.min(1, Math.max(0, u));
-  return clampMaxIter(Math.round(lerp(dz.startMaxIter, dz.endMaxIter, u)));
-}
-
-function deepZoomEffectiveMaxIter() {
-  if (!deepZoom) return maxIterUser;
-  return deepZoomIterForHalfW(deepZoom, view.halfW);
-}
-
-/**
- * Scale max iterations with zoom depth (sqrt of width ratio), clamped.
- * @param {number} startHalfW
- * @param {number} endHalfW
- * @param {number} baseIter
- */
-function computeDeepZoomEndMaxIter(startHalfW, endHalfW, baseIter) {
-  const ratio = startHalfW / endHalfW;
-  if (!Number.isFinite(ratio) || ratio <= 1) return clampMaxIter(baseIter);
-  const scaled = Math.round(baseIter * Math.sqrt(ratio));
-  return Math.min(MAX_ITER_MAX, Math.max(baseIter, scaled));
-}
-
 function canvasCoords(clientX, clientY) {
-  const r = canvas.getBoundingClientRect();
-  const sx = ((clientX - r.left) / r.width) * canvas.width;
-  const sy = ((clientY - r.top) / r.height) * canvas.height;
+  const el = uiCanvas;
+  const r = el.getBoundingClientRect();
+  const sx = ((clientX - r.left) / r.width) * el.width;
+  const sy = ((clientY - r.top) / r.height) * el.height;
   return { sx, sy };
 }
 
 function gpuParams(over = {}) {
   const cw = canvas.width;
   const ch = canvas.height;
-  const maxIter =
-    over.maxIter !== undefined ? over.maxIter >>> 0 : deepZoom ? deepZoomEffectiveMaxIter() >>> 0 : maxIterUser >>> 0;
-  const base = {
+  const maxIter = over.maxIter !== undefined ? over.maxIter >>> 0 : maxIterUser >>> 0;
+  return {
     centerX: over.centerX ?? view.centerX,
     centerY: over.centerY ?? view.centerY,
     halfW: over.halfW ?? view.halfW,
@@ -372,18 +335,164 @@ function gpuParams(over = {}) {
     juliaRe: julia.re,
     juliaIm: julia.im,
   };
-  if (deepZoom) {
-    base.paletteIter = deepZoom.endMaxIter >>> 0;
+}
+
+function buildWasmRenderJob() {
+  const p = gpuParams();
+  const nw = canvas.width | 0;
+  const nh = canvas.height | 0;
+  return {
+    fp: buildFingerprint(),
+    committed: { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW },
+    nw,
+    nh,
+    centerX: p.centerX,
+    centerY: p.centerY,
+    halfW: p.halfW,
+    aspect: nh / nw,
+    maxIter: p.maxIter >>> 0,
+    fractalKind: fractalKind >>> 0,
+    juliaRe: julia.re,
+    juliaIm: julia.im,
+    paletteId: p.paletteId >>> 0,
+    perturbMode: fractalKind === 0 ? 2 : 0,
+  };
+}
+
+function ensureWasmRenderWorker() {
+  if (wasmRenderWorker || wasmRenderSyncFallback) return;
+  try {
+    wasmRenderWorker = new Worker(new URL("./fractal-render-worker.js", import.meta.url), { type: "module" });
+    wasmRenderWorker.onmessage = onWasmWorkerMessage;
+    wasmRenderWorker.onerror = (e) => {
+      console.error(e);
+      wasmRenderSyncFallback = true;
+      wasmRenderInFlight = false;
+      if (wasmRenderWorker) {
+        try {
+          wasmRenderWorker.terminate();
+        } catch (_) {
+          /* ignore */
+        }
+        wasmRenderWorker = null;
+      }
+    };
+  } catch (e) {
+    console.error(e);
+    wasmRenderSyncFallback = true;
   }
-  return base;
 }
 
 /**
- * @returns {number} ms
+ * @param {ReturnType<typeof buildWasmRenderJob>} job
+ */
+function scheduleWasmRender(job) {
+  wasmRenderPending = job;
+  pumpWasmRender();
+}
+
+function pumpWasmRender() {
+  if (wasmRenderInFlight || wasmRenderPending === null || !wasmRenderWorker) return;
+  const job = wasmRenderPending;
+  wasmRenderPending = null;
+  wasmRenderInFlight = true;
+  wasmRenderSeq++;
+  wasmRenderWorker.postMessage({ type: "wasmRender", seq: wasmRenderSeq, ...job });
+}
+
+/**
+ * @param {MessageEvent} e
+ */
+function onWasmWorkerMessage(e) {
+  const d = e.data;
+  if (d?.type !== "wasmRenderDone" || !gpuRenderer) return;
+  wasmRenderInFlight = false;
+  if (!d.ok) {
+    console.error(d.error);
+    wasmRenderSyncFallback = true;
+    if (wasmRenderWorker) {
+      try {
+        wasmRenderWorker.terminate();
+      } catch (_) {
+        /* ignore */
+      }
+      wasmRenderWorker = null;
+    }
+    pumpWasmRender();
+    return;
+  }
+  if (d.seq !== wasmRenderSeq) {
+    pumpWasmRender();
+    return;
+  }
+  if (buildFingerprint() !== d.fp || !viewsEqual(view, d.committed)) {
+    pumpWasmRender();
+    return;
+  }
+  const u8 = new Uint8Array(d.buffer);
+  const ms = gpuRenderer.presentCpuRgba(u8, d.nw, d.nh, { bytesPerRow: d.bytesPerRow });
+  lastWasmPresentMs = ms;
+  committedView = { centerX: d.committed.centerX, centerY: d.committed.centerY, halfW: d.committed.halfW };
+  cacheFingerprint = d.fp;
+  cacheReady = true;
+  pumpWasmRender();
+}
+
+function fullRenderAndCommitSyncWasm() {
+  const p = gpuParams();
+  const nw = canvas.width | 0;
+  const nh = canvas.height | 0;
+  const need = nw * nh * 4;
+  const ptr = alloc(need);
+  try {
+    const perturbMode = fractalKind === 0 ? 2 : 0;
+    render_rgba(
+      ptr,
+      need,
+      nw >>> 0,
+      nh >>> 0,
+      p.centerX,
+      p.centerY,
+      p.halfW,
+      nh / nw,
+      p.maxIter >>> 0,
+      fractalKind >>> 0,
+      julia.re,
+      julia.im,
+      p.paletteId >>> 0,
+      perturbMode,
+    );
+    const u8 = new Uint8Array(wasmMemory.buffer, ptr, need);
+    const ms = gpuRenderer.presentCpuRgba(u8, nw, nh);
+    lastWasmPresentMs = ms;
+    committedView = { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW };
+    cacheFingerprint = buildFingerprint();
+    cacheReady = true;
+    return ms;
+  } finally {
+    dealloc(ptr, need);
+  }
+}
+
+/**
+ * @returns {number} ms (0 when WASM work was queued to a worker; see `lastWasmPresentMs` for last texture upload time)
  */
 function fullRenderAndCommit() {
   if (!gpuRenderer) return 0;
-  const ms = gpuRenderer.drawFull(gpuParams());
+  const p = gpuParams();
+  const nw = canvas.width | 0;
+  const nh = canvas.height | 0;
+
+  if (p.halfW < WASM_F64_HALF_W && nw > 0 && nh > 0) {
+    ensureWasmRenderWorker();
+    if (!wasmRenderSyncFallback && wasmRenderWorker) {
+      scheduleWasmRender(buildWasmRenderJob());
+      return 0;
+    }
+    return fullRenderAndCommitSyncWasm();
+  }
+
+  const ms = gpuRenderer.drawFull(p);
   committedView = { centerX: view.centerX, centerY: view.centerY, halfW: view.halfW };
   cacheFingerprint = buildFingerprint();
   cacheReady = true;
@@ -401,20 +510,25 @@ function screenToComplex(sx, sy) {
 }
 
 function squareFromDrag(x0, y0, x1, y1) {
-  const dim = Math.min(canvas.width, canvas.height);
+  const w = canvas.width;
+  const h = canvas.height;
+  const dim = Math.min(w, h);
   const minX = Math.min(x0, x1);
   const minY = Math.min(y0, y1);
   const maxX = Math.max(x0, x1);
   const maxY = Math.max(y0, y1);
   let S = Math.max(maxX - minX, maxY - minY);
+  S = Math.min(S, dim);
   const cx = (x0 + x1) / 2;
   const cy = (y0 + y1) / 2;
   let left = cx - S / 2;
   let top = cy - S / 2;
   if (left < 0) left = 0;
   if (top < 0) top = 0;
-  if (left + S > dim) left = dim - S;
-  if (top + S > dim) top = dim - S;
+  if (left + S > w) left = w - S;
+  if (top + S > h) top = h - S;
+  if (left < 0) left = 0;
+  if (top < 0) top = 0;
   return { left, top, S };
 }
 
@@ -431,108 +545,17 @@ function viewFromSquare(left, top, S) {
   return { centerX, centerY, halfW };
 }
 
-function updateDeepZoomButtonLabel() {
-  deepZoomBtn.textContent = deepZoom ? "Stop" : "Deep zoom";
-}
-
-function cancelDeepZoom() {
-  deepZoom = null;
-  nextPresetBtn.disabled = false;
-  updateDeepZoomButtonLabel();
-}
-
-function stopDeepZoom(finished) {
-  if (deepZoom) {
-    maxIterUser = deepZoomIterForHalfW(deepZoom, view.halfW);
-    maxIterInput.value = String(maxIterUser);
-    syncIterLabel();
-  }
-  const was = deepZoom !== null;
-  cancelDeepZoom();
-  if (!gpuRenderer || !was) return;
-  const ms = fullRenderAndCommit();
-  const tag = finished ? "Zoom done" : "Zoom stopped";
-  statusEl.textContent = `${tag} · ${ms.toFixed(1)} ms`;
-}
-
-function startDeepZoom() {
-  if (!wasmMemory || !gpuRenderer || deepZoom) return;
-
-  const fp = buildFingerprint();
-  if (!cacheReady || cacheFingerprint !== fp || !viewsEqual(view, committedView)) {
-    fullRenderAndCommit();
-  }
-
-  if (view.halfW <= DEEP_ZOOM_HALF_W_MIN * 1.0001) {
-    statusEl.textContent = "At zoom limit";
-    return;
-  }
-
-  const startHalfW = view.halfW;
-  const endHalfW = DEEP_ZOOM_HALF_W_MIN;
-  const startMaxIter = maxIterUser;
-  const endMaxIter = computeDeepZoomEndMaxIter(startHalfW, endHalfW, startMaxIter);
-
-  deepZoom = {
-    t0: performance.now(),
-    startCX: view.centerX,
-    startCY: view.centerY,
-    startHalfW,
-    targetX: DEEP_ZOOM_TARGET_RE,
-    targetY: DEEP_ZOOM_TARGET_IM,
-    endHalfW,
-    startMaxIter,
-    endMaxIter,
-  };
-
-  nextPresetBtn.disabled = true;
-  updateDeepZoomButtonLabel();
-}
-
-function formatMmSs(ms) {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}:${r.toString().padStart(2, "0")}`;
-}
-
-function stepDeepZoom(now) {
-  const dz = deepZoom;
-  if (!dz || !gpuRenderer) return;
-
-  const elapsed = now - dz.t0;
-  const t = elapsed / DEEP_ZOOM_DURATION_MS;
-
-  if (t >= 1) {
-    view.centerX = dz.targetX;
-    view.centerY = dz.targetY;
-    view.halfW = dz.endHalfW;
-    stopDeepZoom(true);
-    return;
-  }
-
-  const u = smoothstep01(t);
-  view.centerX = lerp(dz.startCX, dz.targetX, u);
-  view.centerY = lerp(dz.startCY, dz.targetY, u);
-  view.halfW = Math.exp(lerp(Math.log(dz.startHalfW), Math.log(dz.endHalfW), u));
-
-  const ms = fullRenderAndCommit();
-  const it = deepZoomEffectiveMaxIter();
-  statusEl.textContent = `Zoom · ${formatMmSs(elapsed)} · ${it} iter · ${ms.toFixed(1)} ms`;
-}
-
 function resetToDefaultView() {
   if (!gpuRenderer) return;
-  cancelDeepZoom();
   rubber = null;
   rubberPointerId = null;
-  nextPresetBtn.disabled = false;
   view.centerX = DEFAULT_VIEW.centerX;
   view.centerY = DEFAULT_VIEW.centerY;
   view.halfW = DEFAULT_VIEW.halfW;
   invalidateCache();
   const ms = fullRenderAndCommit();
-  statusEl.textContent = `Reset · ${ms.toFixed(1)} ms`;
+  const msShow = ms > 0 ? ms : lastWasmPresentMs;
+  statusEl.textContent = `Reset · ${msShow.toFixed(1)} ms`;
 }
 
 function drawRubberOverlay() {
@@ -595,8 +618,6 @@ function fractalEquationOverlayLines() {
         "Burning Ship",
         "z' = (|Re z| + i|Im z|)^2 + c,  z0 = 0,  c = pixel",
       ];
-    case 3:
-      return ["Tricorn", "z' = conj(z)^2 + c,  z0 = 0,  c = pixel"];
     default:
       return ["Mandelbrot", "z' = z^2 + c,  z0 = 0,  c = pixel"];
   }
@@ -646,15 +667,6 @@ function frame() {
   const dtSec = lastKeyboardNavT > 0 ? Math.min(0.048, (now - lastKeyboardNavT) / 1000) : 0;
   lastKeyboardNavT = now;
 
-  if (deepZoom) {
-    stepDeepZoom(now);
-    uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
-    drawViewOverlay();
-    drawRubberOverlay();
-    requestAnimationFrame(frame);
-    return;
-  }
-
   applyKeyboardPanZoom(dtSec);
 
   const fp = buildFingerprint();
@@ -667,13 +679,17 @@ function frame() {
   drawViewOverlay();
   drawRubberOverlay();
 
-  statusEl.textContent = ms > 0 ? `${cw}×${ch} · ${ms.toFixed(1)} ms` : `${cw}×${ch}`;
+  const tag = gpuRenderer?.usedGpuPerturb ? " · GPU perturb" : "";
+  const inWasmBand = view.halfW < WASM_F64_HALF_W;
+  const showMs = ms > 0 ? ms : inWasmBand ? lastWasmPresentMs : 0;
+  statusEl.textContent =
+    showMs > 0 ? `${cw}×${ch}${tag} · ${showMs.toFixed(1)} ms` : `${cw}×${ch}${tag}`;
 
   requestAnimationFrame(frame);
 }
 
 uiCanvas.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0 || deepZoom) return;
+  if (e.button !== 0) return;
   uiCanvas.setPointerCapture(e.pointerId);
   rubberPointerId = e.pointerId;
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
@@ -694,8 +710,6 @@ uiCanvas.addEventListener("pointerup", (e) => {
 
   const { x0, y0, x1, y1 } = rubber;
   rubber = null;
-
-  if (deepZoom) return;
 
   const { left, top, S } = squareFromDrag(x0, y0, x1, y1);
   if (S < MIN_BOX_PX) return;
@@ -718,13 +732,7 @@ resetViewBtn.addEventListener("click", () => {
   resetToDefaultView();
 });
 
-deepZoomBtn.addEventListener("click", () => {
-  if (deepZoom) stopDeepZoom(false);
-  else startDeepZoom();
-});
-
 nextPresetBtn.addEventListener("click", () => {
-  if (deepZoom) return;
   const list = PRESETS[fractalKind];
   if (!list || list.length === 0) return;
   const i = presetRound[fractalKind] % list.length;
@@ -737,10 +745,12 @@ nextPresetBtn.addEventListener("click", () => {
 });
 
 fractalSelect.addEventListener("change", () => {
-  cancelDeepZoom();
-  fractalKind = Number(fractalSelect.value);
+  let fk = Number(fractalSelect.value);
+  if (fk === 3 || !Number.isFinite(fk)) fk = 0;
+  fractalSelect.value = String(fk);
+  fractalKind = fk;
   updateJuliaPanelVisibility();
-  invalidateCache();
+  syncParamsFromInputs();
 });
 
 paletteSelect.addEventListener("change", () => {
@@ -748,21 +758,15 @@ paletteSelect.addEventListener("change", () => {
 });
 
 juliaReInput.addEventListener("input", () => {
-  previewJuliaLabelsFromInputs();
+  syncParamsFromInputs();
 });
 
 juliaImInput.addEventListener("input", () => {
-  previewJuliaLabelsFromInputs();
+  syncParamsFromInputs();
 });
 
-applyParamsBtn.addEventListener("click", () => {
-  cancelDeepZoom();
-  applyRenderParamsFromInputs();
-  invalidateCache();
-});
-
-maxIterInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") applyParamsBtn.click();
+maxIterInput.addEventListener("input", () => {
+  syncParamsFromInputs();
 });
 
 window.addEventListener("keydown", (e) => {
@@ -795,10 +799,19 @@ function syncStackPixelSize() {
   const rect = stack.getBoundingClientRect();
   if (rect.width < 8 || rect.height < 8) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  let nw = Math.round(rect.width * dpr);
-  let nh = Math.round(rect.height * dpr);
+  // Floor avoids round-trip bias that can oscillate with subpixel layout; pairs with jitter guard below.
+  let nw = Math.floor(rect.width * dpr);
+  let nh = Math.floor(rect.height * dpr);
   nw = Math.min(CANVAS_PX_MAX, Math.max(CANVAS_PX_MIN, nw));
   nh = Math.min(CANVAS_PX_MAX, Math.max(CANVAS_PX_MIN, nh));
+
+  const cw = canvas.width | 0;
+  const ch = canvas.height | 0;
+  // Layout can wobble 1–2 device px; skip resize to avoid redundant GPU reallocations.
+  if (cw > 0 && ch > 0 && Math.abs(nw - cw) <= 2 && Math.abs(nh - ch) <= 2) {
+    return;
+  }
+
   if (
     canvas.width !== nw ||
     canvas.height !== nh ||
@@ -814,6 +827,15 @@ function syncStackPixelSize() {
   }
 }
 
+let stackResizeRaf = 0;
+function scheduleSyncStackPixelSize() {
+  if (stackResizeRaf) return;
+  stackResizeRaf = requestAnimationFrame(() => {
+    stackResizeRaf = 0;
+    syncStackPixelSize();
+  });
+}
+
 async function main() {
   if (!webGpuSupported()) {
     statusEl.textContent = "WebGPU is required (enable in browser / use Chromium).";
@@ -824,7 +846,6 @@ async function main() {
   wasmMemory = wasm.memory;
   applyRenderParamsFromInputs();
   updateJuliaPanelVisibility();
-  updateDeepZoomButtonLabel();
 
   try {
     gpuRenderer = await createFractalGpuRenderer(
@@ -843,7 +864,7 @@ async function main() {
   syncStackPixelSize();
   const stack = canvas.parentElement;
   if (stack && typeof ResizeObserver !== "undefined") {
-    new ResizeObserver(() => syncStackPixelSize()).observe(stack);
+    new ResizeObserver(() => scheduleSyncStackPixelSize()).observe(stack);
   }
 
   // One frame lets layout settle so syncStackPixelSize sees a real .canvas-stack rect (not 256×256).

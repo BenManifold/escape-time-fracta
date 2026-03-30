@@ -129,22 +129,6 @@
       #resetView:hover {
         background: rgba(255, 255, 255, 0.1);
       }
-      #deepZoom {
-        border: 1px solid rgba(255, 200, 120, 0.25);
-        background: rgba(255, 200, 120, 0.1);
-        color: #e8c49a;
-      }
-      #deepZoom:hover {
-        background: rgba(255, 200, 120, 0.18);
-      }
-      #applyParams {
-        border: 1px solid rgba(110, 181, 255, 0.35);
-        background: rgba(110, 181, 255, 0.12);
-        color: var(--accent);
-      }
-      #applyParams:hover {
-        background: rgba(110, 181, 255, 0.22);
-      }
       #status {
         margin-top: 8px;
         font-size: 11px;
@@ -182,7 +166,6 @@
             <option value="0">Mandelbrot</option>
             <option value="1">Julia</option>
             <option value="2">Burning Ship</option>
-            <option value="3">Tricorn</option>
           </select>
         </label>
         <label>
@@ -196,7 +179,7 @@
             <option value="1">Flotilla (sea &amp; fire)</option>
             <option value="2">Classic</option>
             <option value="3">Grayscale</option>
-            <option value="4">Ghost ship (Wiki palette)</option>
+            <option value="4">Ghost ship</option>
           </select>
         </label>
         <div id="juliaPanel" hidden>
@@ -209,12 +192,10 @@
             <input id="juliaIm" type="range" min="-2000" max="2000" step="1" value="189" />
           </label>
         </div>
-        <button type="button" class="hudBtn" id="applyParams">Apply</button>
         <button type="button" class="hudBtn" id="nextPreset">Next preset</button>
         <button type="button" class="hudBtn" id="resetView">Reset view</button>
-        <button type="button" class="hudBtn" id="deepZoom">Deep zoom</button>
         <div class="hint">
-          WebGPU f32 escape-time + WASM palette LUT. Drag to box-zoom; arrows/WASD pan; +/− zoom (hold). Apply after max iter / Julia changes. Deep zoom animates toward (0, 1) in the complex plane, ramps max iterations with depth, and renders each frame on the GPU.
+          WebGPU for moderate zoom; past a half-width cutoff all fractals use WASM f64 mapping (Mandelbrot: tiled f64 perturb). Drag to box-zoom; arrows/WASD pan; +/− zoom (hold). Julia c, max iter, and palette update the image as you change them.
         </div>
         <div id="status"></div>
       </div>
