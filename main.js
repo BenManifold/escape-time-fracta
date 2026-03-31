@@ -109,6 +109,9 @@ const mandelModeExpBtn = document.getElementById("mandelModeExp");
 const nextPresetBtn = document.getElementById("nextPreset");
 const resetViewBtn = document.getElementById("resetView");
 const paletteSelect = document.getElementById("palette");
+const hudEl = document.getElementById("hud");
+const hudHideUiBtn = document.getElementById("hudHideUiBtn");
+const showUiChromeBtn = document.getElementById("showUiChromeBtn");
 
 /** @type {Array<Array<{ centerX: number; centerY: number; halfW: number }>>} */
 const PRESETS = [
@@ -175,6 +178,8 @@ const julia = {
 };
 
 let maxIterUser = clampMaxIter(Number(maxIterInput.value));
+let uiChromeVisible = true;
+
 let fractalKind = (() => {
   let fk = Number(fractalSelect.value);
   if (fk === 3 || !Number.isFinite(fk)) fk = 0;
@@ -311,6 +316,16 @@ function isTypingFocusTarget(target) {
   const tag = el.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
   return !!el.closest?.("input, textarea, select");
+}
+
+function setUiChromeVisible(visible) {
+  uiChromeVisible = visible;
+  if (hudEl) hudEl.hidden = !visible;
+  if (showUiChromeBtn) showUiChromeBtn.hidden = visible;
+  if (!visible && hudEl) {
+    const ae = document.activeElement;
+    if (ae instanceof HTMLElement && hudEl.contains(ae)) ae.blur();
+  }
 }
 
 function setKeyPanZoomFromCode(code, down) {
@@ -1605,20 +1620,18 @@ function formatLambdaJulia(re, im) {
 }
 
 /**
- * @returns {string[]}
- */
-/**
  * Bottom-left canvas overlay (same typography as `drawViewOverlay` top block).
  * @returns {string[]}
  */
 function canvasControlHintLines() {
-  return [
+  const lines = [
     "arrows / WASD        pan",
     "+ / - (hold)         zoom",
     "click-drag           box zoom / λ-drag",
-    "shift + click-drag   λ-drag fine adjustments"
-
+    "shift + click-drag   λ-drag fine adjustments",
   ];
+  if (uiChromeVisible) lines.push("backspace            hide UI");
+  return lines;
 }
 
 function fractalEquationOverlayLines() {
@@ -1728,7 +1741,7 @@ function frame() {
   }
 
   uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
-  drawViewOverlay();
+  if (uiChromeVisible) drawViewOverlay();
   drawRubberOverlay();
 
   const tag = gpuRenderer?.usedGpuPerturb ? " · GPU perturb" : "";
@@ -2014,6 +2027,9 @@ function wireJigglePhysicsSliders() {
   juliaJiggleCapInput?.addEventListener("input", onInput);
 }
 
+hudHideUiBtn?.addEventListener("click", () => setUiChromeVisible(false));
+showUiChromeBtn?.addEventListener("click", () => setUiChromeVisible(true));
+
 mandelModeBoxBtn?.addEventListener("click", () => setMandelCanvasMode("box"));
 mandelModeExpBtn?.addEventListener("click", () => setMandelCanvasMode("exp"));
 
@@ -2023,6 +2039,11 @@ maxIterInput.addEventListener("input", () => {
 
 window.addEventListener("keydown", (e) => {
   if (isTypingFocusTarget(e.target)) return;
+  if (e.code === "Backspace" && !e.repeat) {
+    setUiChromeVisible(!uiChromeVisible);
+    e.preventDefault();
+    return;
+  }
   if (!setKeyPanZoomFromCode(e.code, true)) return;
   e.preventDefault();
 });
