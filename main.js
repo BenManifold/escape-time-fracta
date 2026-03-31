@@ -1613,9 +1613,11 @@ function formatLambdaJulia(re, im) {
  */
 function canvasControlHintLines() {
   return [
-    "pan · arrows / WASD (hold)",
-    "zoom · + / − (hold)",
-    "shift + drag · finer λ / zoom",
+    "arrows / WASD        pan",
+    "+ / - (hold)         zoom",
+    "click-drag           box zoom / λ-drag",
+    "shift + click-drag   λ-drag fine adjustments"
+
   ];
 }
 
