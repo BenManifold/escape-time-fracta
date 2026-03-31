@@ -284,8 +284,8 @@ let mandelExpDrag = null;
  */
 let juliaLambdaTour = null;
 
-/** Speed when starting a tour (1× = slowest baseline). */
-let juliaTourSpeedMult = 1;
+/** Speed when starting a tour (1× = slowest baseline; default HUD = 100×). */
+let juliaTourSpeedMult = 100;
 let juliaTourDirRe = 1;
 let juliaTourDirIm = 1;
 
