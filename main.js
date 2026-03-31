@@ -40,6 +40,7 @@ const JIGGLE_DIR_KICK_PER_STEP = 0.014;
 const JIGGLE_POS_EPS = 1e-7;
 const JIGGLE_VEL_EPS = 2e-6;
 const JIGGLE_MAX_SEC = 3.2;
+const JULIA_JIGGLE_PANEL_COLLAPSED_LS = "escapeTimeFracta_juliaJigglePanelCollapsed";
 
 /**
  * Julia λ tour: phase advance per animation frame (rad). Re/Im sweep [-JULIA_C_LIM, JULIA_C_LIM]
@@ -102,6 +103,8 @@ const juliaJiggleSpringVal = document.getElementById("juliaJiggleSpringVal");
 const juliaJiggleDampingVal = document.getElementById("juliaJiggleDampingVal");
 const juliaJiggleCarryVal = document.getElementById("juliaJiggleCarryVal");
 const juliaJiggleCapVal = document.getElementById("juliaJiggleCapVal");
+const juliaJiggleSubPanel = document.getElementById("juliaJiggleSubPanel");
+const juliaJigglePanelToggle = document.getElementById("juliaJigglePanelToggle");
 const mandelPanel = document.getElementById("mandelPanel");
 const mandelModeBoxBtn = document.getElementById("mandelModeBox");
 const mandelModeExpBtn = document.getElementById("mandelModeExp");
@@ -566,6 +569,45 @@ function updateJuliaJiggleSnapToggleUI() {
   if (!juliaJiggleSnapBtn) return;
   juliaJiggleSnapBtn.classList.toggle("juliaModeBtnActive", juliaJiggleSnapEnabled);
   juliaJiggleSnapBtn.setAttribute("aria-pressed", juliaJiggleSnapEnabled ? "true" : "false");
+}
+
+function syncJuliaJigglePanelCollapsedUI() {
+  if (!juliaJiggleSubPanel || !juliaJigglePanelToggle) return;
+  const collapsed = juliaJiggleSubPanel.classList.contains("juliaSubPanelCollapsed");
+  juliaJigglePanelToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  juliaJigglePanelToggle.setAttribute(
+    "aria-label",
+    collapsed ? "Expand elastic release panel" : "Collapse elastic release panel",
+  );
+  juliaJigglePanelToggle.title = collapsed
+    ? "Expand elastic release controls"
+    : "Collapse elastic release controls";
+}
+
+function setJuliaJigglePanelCollapsed(collapsed) {
+  if (!juliaJiggleSubPanel) return;
+  juliaJiggleSubPanel.classList.toggle("juliaSubPanelCollapsed", collapsed);
+  try {
+    localStorage.setItem(JULIA_JIGGLE_PANEL_COLLAPSED_LS, collapsed ? "1" : "0");
+  } catch {
+    /* quota / private mode */
+  }
+  syncJuliaJigglePanelCollapsedUI();
+}
+
+function initJuliaJigglePanelCollapse() {
+  if (!juliaJiggleSubPanel || !juliaJigglePanelToggle) return;
+  try {
+    if (localStorage.getItem(JULIA_JIGGLE_PANEL_COLLAPSED_LS) === "1") {
+      juliaJiggleSubPanel.classList.add("juliaSubPanelCollapsed");
+    }
+  } catch {
+    /* ignore */
+  }
+  syncJuliaJigglePanelCollapsedUI();
+  juliaJigglePanelToggle.addEventListener("click", () => {
+    setJuliaJigglePanelCollapsed(!juliaJiggleSubPanel.classList.contains("juliaSubPanelCollapsed"));
+  });
 }
 
 function updateJiggleParamValueLabels() {
@@ -2046,6 +2088,7 @@ async function main() {
   wireJigglePhysicsSliders();
   syncJigglePhysicsFromInputs();
   updateJuliaJiggleSnapToggleUI();
+  initJuliaJigglePanelCollapse();
 
   try {
     gpuRenderer = await createFractalGpuRenderer(

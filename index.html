@@ -210,6 +210,49 @@
         color: var(--muted);
         letter-spacing: 0.03em;
       }
+      .juliaSubPanelHeader {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .juliaSubPanelTitleInline {
+        margin: 0;
+        flex: 1;
+        min-width: 0;
+      }
+      .juliaSubPanelCollapseBtn {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0;
+        padding: 4px 6px;
+        border: none;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+        cursor: pointer;
+        transition: background 0.12s ease, color 0.12s ease;
+      }
+      .juliaSubPanelCollapseBtn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--text);
+      }
+      .juliaSubPanelCollapseBtn svg {
+        display: block;
+        transition: transform 0.15s ease;
+      }
+      .juliaSubPanelCollapsed .juliaSubPanelCollapseBtn svg {
+        transform: rotate(-90deg);
+      }
+      .juliaSubPanelCollapsed .juliaSubPanelHeader {
+        margin-bottom: 0;
+      }
+      .juliaSubPanelCollapsed .juliaJigglePanelBody {
+        display: none;
+      }
       .juliaJiggleSnapMainBtn {
         width: 100%;
         margin: 0 0 4px;
@@ -581,49 +624,80 @@
               </button>
             </div>
           </div>
-          <div class="juliaSubPanel" role="group" aria-labelledby="juliaJigglePanelTitle">
-            <h2 class="juliaSubPanelTitle" id="juliaJigglePanelTitle">Elastic release (λ drag)</h2>
-            <p class="juliaJiggleIntro">After you let go on the canvas, λ can overshoot and settle like soft jello. Tune the feel below.</p>
-            <button
-              type="button"
-              class="juliaModeBtn juliaModeBtnActive juliaJiggleSnapMainBtn"
-              id="juliaJiggleSnapBtn"
-              aria-pressed="true"
-              title="Turn elastic settle on or off"
-            >
-              Jiggle snap
-            </button>
-            <div class="juliaJiggleSliderRow">
-              <div class="juliaJiggleSliderHead">
-                <span>Pull-back strength</span>
-                <span id="juliaJiggleSpringVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
-              </div>
-              <span class="juliaJiggleSliderPlain">How strongly λ is drawn toward where you released.</span>
-              <input type="range" id="juliaJiggleSpring" min="40" max="320" step="5" value="265" />
+          <div
+            class="juliaSubPanel juliaSubPanelCollapsible"
+            id="juliaJiggleSubPanel"
+            role="group"
+            aria-labelledby="juliaJigglePanelTitle"
+          >
+            <div class="juliaSubPanelHeader">
+              <h2 class="juliaSubPanelTitle juliaSubPanelTitleInline" id="juliaJigglePanelTitle">Elastic release (λ drag)</h2>
+              <button
+                type="button"
+                class="juliaSubPanelCollapseBtn"
+                id="juliaJigglePanelToggle"
+                aria-expanded="true"
+                aria-controls="juliaJigglePanelBody"
+                aria-label="Collapse elastic release panel"
+                title="Collapse elastic release controls"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                  <path
+                    d="M3.5 5.25 L7 8.75 L10.5 5.25"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
             </div>
-            <div class="juliaJiggleSliderRow">
-              <div class="juliaJiggleSliderHead">
-                <span>Wobble damping</span>
-                <span id="juliaJiggleDampingVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+            <div id="juliaJigglePanelBody" class="juliaJigglePanelBody">
+              <p class="juliaJiggleIntro">
+                After you let go on the canvas, λ can overshoot and settle like soft jello. Tune the feel below.
+              </p>
+              <button
+                type="button"
+                class="juliaModeBtn juliaModeBtnActive juliaJiggleSnapMainBtn"
+                id="juliaJiggleSnapBtn"
+                aria-pressed="true"
+                title="Turn elastic settle on or off"
+              >
+                Jiggle snap
+              </button>
+              <div class="juliaJiggleSliderRow">
+                <div class="juliaJiggleSliderHead">
+                  <span>Pull-back strength</span>
+                  <span id="juliaJiggleSpringVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+                </div>
+                <span class="juliaJiggleSliderPlain">How strongly λ is drawn toward where you released.</span>
+                <input type="range" id="juliaJiggleSpring" min="40" max="320" step="5" value="265" />
               </div>
-              <span class="juliaJiggleSliderPlain">Higher values calm the bounce faster (more friction).</span>
-              <input type="range" id="juliaJiggleDamping" min="4" max="55" step="1" value="9" />
-            </div>
-            <div class="juliaJiggleSliderRow">
-              <div class="juliaJiggleSliderHead">
-                <span>Release carry</span>
-                <span id="juliaJiggleCarryVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+              <div class="juliaJiggleSliderRow">
+                <div class="juliaJiggleSliderHead">
+                  <span>Wobble damping</span>
+                  <span id="juliaJiggleDampingVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+                </div>
+                <span class="juliaJiggleSliderPlain">Higher values calm the bounce faster (more friction).</span>
+                <input type="range" id="juliaJiggleDamping" min="4" max="55" step="1" value="9" />
               </div>
-              <span class="juliaJiggleSliderPlain">How much of your drag speed feeds the first wobble.</span>
-              <input type="range" id="juliaJiggleCarry" min="5" max="50" step="1" value="30" title="Displayed as tenths (3.0 = 30)" />
-            </div>
-            <div class="juliaJiggleSliderRow">
-              <div class="juliaJiggleSliderHead">
-                <span>Max wobble speed</span>
-                <span id="juliaJiggleCapVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+              <div class="juliaJiggleSliderRow">
+                <div class="juliaJiggleSliderHead">
+                  <span>Release carry</span>
+                  <span id="juliaJiggleCarryVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+                </div>
+                <span class="juliaJiggleSliderPlain">How much of your drag speed feeds the first wobble.</span>
+                <input type="range" id="juliaJiggleCarry" min="5" max="50" step="1" value="30" title="Displayed as tenths (3.0 = 30)" />
               </div>
-              <span class="juliaJiggleSliderPlain">Caps how fast λ can move during the settle (per axis).</span>
-              <input type="range" id="juliaJiggleCap" min="12" max="96" step="2" value="70" />
+              <div class="juliaJiggleSliderRow">
+                <div class="juliaJiggleSliderHead">
+                  <span>Max wobble speed</span>
+                  <span id="juliaJiggleCapVal" class="juliaJiggleSliderPlain" aria-live="polite"></span>
+                </div>
+                <span class="juliaJiggleSliderPlain">Caps how fast λ can move during the settle (per axis).</span>
+                <input type="range" id="juliaJiggleCap" min="12" max="96" step="2" value="70" />
+              </div>
             </div>
           </div>
           <label>
