@@ -40,8 +40,6 @@ const JIGGLE_DIR_KICK_PER_STEP = 0.014;
 const JIGGLE_POS_EPS = 1e-7;
 const JIGGLE_VEL_EPS = 2e-6;
 const JIGGLE_MAX_SEC = 3.2;
-const JULIA_JIGGLE_PANEL_COLLAPSED_LS = "escapeTimeFracta_juliaJigglePanelCollapsed";
-
 /**
  * Julia λ tour: phase advance per animation frame (rad). Re/Im sweep [-JULIA_C_LIM, JULIA_C_LIM]
  * via sin (zero slope at extrema ⇒ smooth rubber). Peak |Δλ|/frame ≈ JULIA_C_LIM * DPHASE (e.g. ~1e-7 when DPHASE=5e-8).
@@ -587,23 +585,11 @@ function syncJuliaJigglePanelCollapsedUI() {
 function setJuliaJigglePanelCollapsed(collapsed) {
   if (!juliaJiggleSubPanel) return;
   juliaJiggleSubPanel.classList.toggle("juliaSubPanelCollapsed", collapsed);
-  try {
-    localStorage.setItem(JULIA_JIGGLE_PANEL_COLLAPSED_LS, collapsed ? "1" : "0");
-  } catch {
-    /* quota / private mode */
-  }
   syncJuliaJigglePanelCollapsedUI();
 }
 
 function initJuliaJigglePanelCollapse() {
   if (!juliaJiggleSubPanel || !juliaJigglePanelToggle) return;
-  try {
-    if (localStorage.getItem(JULIA_JIGGLE_PANEL_COLLAPSED_LS) === "1") {
-      juliaJiggleSubPanel.classList.add("juliaSubPanelCollapsed");
-    }
-  } catch {
-    /* ignore */
-  }
   syncJuliaJigglePanelCollapsedUI();
   juliaJigglePanelToggle.addEventListener("click", () => {
     setJuliaJigglePanelCollapsed(!juliaJiggleSubPanel.classList.contains("juliaSubPanelCollapsed"));
@@ -1621,6 +1607,18 @@ function formatLambdaJulia(re, im) {
 /**
  * @returns {string[]}
  */
+/**
+ * Bottom-left canvas overlay (same typography as `drawViewOverlay` top block).
+ * @returns {string[]}
+ */
+function canvasControlHintLines() {
+  return [
+    "pan · arrows / WASD (hold)",
+    "zoom · + / − (hold)",
+    "shift + drag · finer λ / zoom",
+  ];
+}
+
 function fractalEquationOverlayLines() {
   switch (fractalKind) {
     case 1:
@@ -1671,7 +1669,24 @@ function drawViewOverlay() {
     uiCtx.fillStyle = "rgba(232, 232, 239, 0.94)";
     uiCtx.fillText(line, pad, y);
     y += lineH;
-    if (y > h - pad) break;
+    if (y > h - pad - lineH * 4) break;
+  }
+
+  const hintLines = canvasControlHintLines();
+  let yBot = h - pad - hintLines.length * lineH;
+  if (yBot < y + lineH) {
+    yBot = Math.max(pad, y + lineH);
+  }
+  for (let i = 0; i < hintLines.length; i++) {
+    const line = hintLines[i];
+    const yy = yBot + i * lineH;
+    uiCtx.strokeStyle = "rgba(0, 0, 0, 0.72)";
+    uiCtx.lineWidth = 4;
+    uiCtx.lineJoin = "round";
+    uiCtx.miterLimit = 2;
+    uiCtx.strokeText(line, pad, yy);
+    uiCtx.fillStyle = "rgba(200, 200, 210, 0.88)";
+    uiCtx.fillText(line, pad, yy);
   }
   uiCtx.restore();
 }

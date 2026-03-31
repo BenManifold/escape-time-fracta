@@ -8,7 +8,7 @@
       :root {
         color-scheme: dark;
         --bg: #0c0c0f;
-        --panel: rgba(20, 20, 28, 0.92);
+        --panel: rgba(20, 20, 28, 0.78);
         --text: #e8e8ef;
         --muted: #9898a8;
         --accent: #6eb5ff;
@@ -69,22 +69,22 @@
         padding: 12px 14px;
         border-radius: 10px;
         background: var(--panel);
-        backdrop-filter: blur(8px);
+        backdrop-filter: blur(12px);
         font-size: 13px;
         line-height: 1.45;
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.1);
         overflow-y: auto;
         align-self: stretch;
-      }
-      #juliaPanel {
-        width: 100%;
-        box-sizing: border-box;
       }
       #hud h1 {
         margin: 0 0 8px;
         font-size: 14px;
         font-weight: 600;
         letter-spacing: 0.02em;
+      }
+      #juliaPanel {
+        width: 100%;
+        box-sizing: border-box;
       }
       #hud label {
         display: flex;
@@ -98,66 +98,6 @@
       #hud input[type="number"] {
         flex: 1;
         min-width: 0;
-      }
-      .hudHints {
-        margin-top: 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        font-size: 13px;
-        line-height: 1.35;
-        color: var(--muted);
-      }
-      .hudHintsIconRow {
-        display: flex;
-        flex-direction: row;
-        flex-wrap: wrap;
-        align-items: flex-start;
-        justify-content: center;
-        gap: 14px 20px;
-      }
-      .hudHintCol {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 6px;
-        flex: 0 0 auto;
-        width: 4.75rem;
-      }
-      .hudHintIcon {
-        height: 32px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 100%;
-        color: var(--muted);
-      }
-      .hudHintIcon svg {
-        display: block;
-      }
-      .hudZoomGlyphs {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 4px;
-        font-family: ui-monospace, "Cascadia Code", monospace;
-        font-weight: 600;
-        font-size: 16px;
-        line-height: 1;
-      }
-      .hudHintLabel {
-        font-size: inherit;
-        line-height: inherit;
-        text-align: center;
-        width: 100%;
-        text-wrap: balance;
-      }
-      .hudHintSub {
-        margin: 0;
-        padding-top: 2px;
-        font-size: inherit;
-        line-height: inherit;
-        text-align: center;
       }
       .hudBtn {
         margin-top: 10px;
@@ -625,7 +565,7 @@
             </div>
           </div>
           <div
-            class="juliaSubPanel juliaSubPanelCollapsible"
+            class="juliaSubPanel juliaSubPanelCollapsible juliaSubPanelCollapsed"
             id="juliaJiggleSubPanel"
             role="group"
             aria-labelledby="juliaJigglePanelTitle"
@@ -636,10 +576,10 @@
                 type="button"
                 class="juliaSubPanelCollapseBtn"
                 id="juliaJigglePanelToggle"
-                aria-expanded="true"
+                aria-expanded="false"
                 aria-controls="juliaJigglePanelBody"
-                aria-label="Collapse elastic release panel"
-                title="Collapse elastic release controls"
+                aria-label="Expand elastic release panel"
+                title="Expand elastic release controls"
               >
                 <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
                   <path
@@ -818,30 +758,6 @@
         </div>
         <button type="button" class="hudBtn" id="nextPreset">Next preset</button>
         <button type="button" class="hudBtn" id="resetView">Reset view</button>
-        <div class="hudHints" aria-label="Keyboard and canvas">
-          <div class="hudHintsIconRow">
-            <div class="hudHintCol" title="Arrow keys or WASD (hold)">
-              <div class="hudHintIcon" aria-hidden="true">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
-                  <path
-                    d="M12 3 L15 9 H9 Z M12 21 L9 15 H15 Z M3 12 L9 10 V14 Z M21 12 L15 10 V14 Z"
-                  />
-                </svg>
-              </div>
-              <span class="hudHintLabel">pan</span>
-            </div>
-            <div class="hudHintCol" title="+ / − keys (hold)">
-              <div class="hudHintIcon" aria-hidden="true">
-                <span class="hudZoomGlyphs">
-                  <span>+</span>
-                  <span>−</span>
-                </span>
-              </div>
-              <span class="hudHintLabel">zoom</span>
-            </div>
-          </div>
-          <p class="hudHintSub">shift + drag - fine adjustments</p>
-        </div>
         <div id="status"></div>
       </div>
     </div>
