@@ -5,6 +5,8 @@ const MIN_BOX_PX = 4;
 /** Clamp drawable width/height (backing-store px) for GPU memory and perf. */
 const CANVAS_PX_MIN = 256;
 const CANVAS_PX_MAX = 4096;
+/** Match `index.html` @media (max-width: 720px) for mobile HUD and touch gestures. */
+const MOBILE_LAYOUT_MAX_WIDTH = 720;
 
 /** Pan: fraction of the visible complex width (2·halfW) per second while a pan key is held. */
 const KEY_PAN_FRAC_PER_SEC = 0.42;
@@ -48,9 +50,9 @@ const JULIA_TOUR_DPHASE_RAD = 5e-8;
 /** Im uses phase * this factor so Re/Im don’t stay locked in phase. */
 const JULIA_TOUR_IM_PHASE_MUL = 0.618033988749895;
 /** Upper bound for global φ scan on resync (Lissajous is quasi-periodic; wide span avoids wrong local minima). */
-const JULIA_TOUR_RESYNC_PHI_MAX = 3000 * Math.PI
+const JULIA_TOUR_RESYNC_PHI_MAX = 3000 * Math.PI;
 /** Min half-width of Lissajous box per axis (λ at a face still gets a tiny oscillation). */
-const JULIA_TOUR_MIN_BOX_HALF = 0.02
+const JULIA_TOUR_MIN_BOX_HALF = 0.02;
 
 /** Random-walk: ms between independent Re/Im step picks (−1, 0, +1 per axis). */
 const JULIA_RW_CHOICE_MS = 5000;
@@ -71,23 +73,86 @@ const DEFAULT_VIEW = Object.freeze({
 
 const canvas = document.getElementById("canvas");
 const uiCanvas = document.getElementById("canvasUi");
-const uiCtx = uiCanvas.getContext("2d", { alpha: true, desynchronized: true });
+/* `desynchronized` can glitch next to WebGPU on some mobile WebKit builds; fall back cleanly. */
+const uiCtx =
+  uiCanvas?.getContext("2d", { alpha: true, desynchronized: true }) ||
+  uiCanvas?.getContext("2d", { alpha: true }) ||
+  null;
 const fractalSelect = document.getElementById("fractal");
 const maxIterInput = document.getElementById("maxIter");
 const iterLabel = document.getElementById("iterLabel");
 const statusEl = document.getElementById("status");
+
+/** @param {unknown} [err] */
+function formatLoadErrorDetail(err) {
+  if (err === undefined || err === null) return "";
+  if (err instanceof Error) {
+    return `${err.message}\n${err.stack || ""}`.trim();
+  }
+  return String(err);
+}
+
+/**
+ * Visible full-screen panel (see `index.html` inline script) plus `#status` line — for devices without a console.
+ * @param {string} summary
+ * @param {unknown} [err]
+ */
+function showFatalLoadError(summary, err) {
+  const detail = formatLoadErrorDetail(err);
+  const w = /** @type {{ __fractaShowFatal?: (a: string, b?: string) => void }} */ (window);
+  if (typeof w.__fractaShowFatal === "function") {
+    w.__fractaShowFatal(summary, detail || undefined);
+  }
+  if (statusEl) {
+    const line = detail ? detail.split("\n")[0] : "";
+    statusEl.textContent = line ? `${summary}: ${line}` : summary;
+  }
+}
+
+function webGpuMissingUserMessage() {
+  const parts = [
+    "This page needs WebGPU (`navigator.gpu`). Without it the GPU renderer cannot start.",
+  ];
+  if (typeof navigator === "undefined") return parts.join(" ");
+  // WebGPU is only exposed in a secure context (HTTPS or localhost, not http://LAN/).
+  if (typeof window !== "undefined" && window.isSecureContext === false) {
+    parts.push(
+      "This tab is not a secure context (not HTTPS). Browsers omit `navigator.gpu` on plain http:// except for localhost, so the same phone can run the app on https:// (e.g. GitHub Pages) but not when you open http://YOUR-LAN-IP from `npx serve` or similar. Fix: use HTTPS locally (mkcert, Caddy, dev tunnel), USB port-forward to localhost, or test on a deployed preview.",
+    );
+    return parts.join("\n\n");
+  }
+  const ua = navigator.userAgent || "";
+  const appleTouch =
+    /iPhone|iPad|iPod/i.test(ua) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const looksFirefox = /Firefox\//i.test(ua) || /FxiOS\//i.test(ua);
+  if (appleTouch) {
+    parts.push(
+      "On iPhone and iPad, every browser (Firefox, Chrome, Safari, etc.) uses Apple's WebKit engine, so WebGPU availability is the same in all of them and depends on your iOS version, not on which browser icon you tap. Update iOS if you can, or use a desktop or Android device with a browser that exposes WebGPU.",
+    );
+  } else if (looksFirefox) {
+    parts.push(
+      "This Firefox build does not expose WebGPU here. Try current Chrome or Edge, or a newer Firefox on a platform where WebGPU is enabled; check Firefox release notes for WebGPU on your OS.",
+    );
+  } else {
+    parts.push("Try a current Chrome, Edge, or Safari build with WebGPU enabled.");
+  }
+  return parts.join("\n\n");
+}
+
 const juliaPanel = document.getElementById("juliaPanel");
 const juliaReInput = document.getElementById("juliaRe");
 const juliaImInput = document.getElementById("juliaIm");
 const juliaLambdaWheel = document.getElementById("juliaLambdaWheel");
-const juliaLambdaWheelKnob = document.getElementById("juliaLambdaWheelKnob");
+const juliaMobileTourBar = document.getElementById("juliaMobileTourBar");
+const juliaTourPlayPauseBtn = document.getElementById("juliaTourPlayPause");
+const hudMobileAdvancedToggle = document.getElementById("hudMobileAdvancedToggle");
 const juliaReLabel = document.getElementById("juliaReLabel");
 const juliaImLabel = document.getElementById("juliaImLabel");
 const juliaModeBoxBtn = document.getElementById("juliaModeBox");
 const juliaModeLambdaBtn = document.getElementById("juliaModeLambda");
 const juliaTourPlayBtn = document.getElementById("juliaTourPlay");
 const juliaTourPauseBtn = document.getElementById("juliaTourPause");
-const juliaTourDirPad = document.getElementById("juliaTourDirPad");
 const juliaPathRandomWalkBtn = document.getElementById("juliaPathRandomWalk");
 const juliaTourSpeedBtns = /** @type {NodeListOf<HTMLButtonElement>} */ (
   document.querySelectorAll(".juliaTourSpeedBtn")
@@ -112,6 +177,11 @@ const paletteSelect = document.getElementById("palette");
 const hudEl = document.getElementById("hud");
 const hudHideUiBtn = document.getElementById("hudHideUiBtn");
 const showUiChromeBtn = document.getElementById("showUiChromeBtn");
+const mobileParamDragBtn = document.getElementById("mobileParamDragBtn");
+const juliaLambdaWheelSubPanel = document.getElementById("juliaLambdaWheelSubPanel");
+const juliaLambdaWheelPanelToggle = document.getElementById("juliaLambdaWheelPanelToggle");
+const juliaTourPathSubPanel = document.getElementById("juliaTourPathSubPanel");
+const juliaTourPathPanelToggle = document.getElementById("juliaTourPathPanelToggle");
 
 /** @type {Array<Array<{ centerX: number; centerY: number; halfW: number }>>} */
 const PRESETS = [
@@ -304,6 +374,23 @@ const keysPanZoom = {
 /** @type {number} performance.now() ms; 0 = skip dt on first frame */
 let lastKeyboardNavT = 0;
 
+const mobileLayoutMql = window.matchMedia(`(max-width: ${MOBILE_LAYOUT_MAX_WIDTH}px)`);
+
+/** When true, canvas uses two-finger pan/pinch and optional param-drag toggle instead of box zoom. */
+function isMobileTouchLayout() {
+  return mobileLayoutMql.matches;
+}
+
+/** Mobile: allow one-finger λ / p drag when on; off = navigate with two fingers only. */
+let mobileParamDragEnabled = isMobileTouchLayout();
+
+/** @type {Map<number, { sx: number; sy: number }>} */
+let mobileCanvasPointers = new Map();
+let mobileTwoFingerNav = false;
+/** @type {{ sx: number; sy: number } | null} */
+let mobileLastPinchMid = null;
+let mobileLastPinchDist = 0;
+
 function clampJuliaComponent(v) {
   if (!Number.isFinite(v)) return 0;
   return Math.min(JULIA_C_LIM, Math.max(-JULIA_C_LIM, v));
@@ -484,9 +571,8 @@ function syncJuliaHudFromJuliaState() {
  * Move the λ disk knob and aria to match `julia` (disk maps Re/Im to horizontal/vertical in ±JULIA_C_LIM).
  */
 function updateJuliaLambdaWheelVisual() {
-  const knob = juliaLambdaWheelKnob;
-  const wheel = juliaLambdaWheel;
-  if (!knob || !wheel) return;
+  const wheels = document.querySelectorAll(".juliaLambdaWheel");
+  if (!wheels.length) return;
   let nx = julia.re / JULIA_C_LIM;
   let nyScr = -julia.im / JULIA_C_LIM;
   if (!Number.isFinite(nx)) nx = 0;
@@ -497,17 +583,23 @@ function updateJuliaLambdaWheelVisual() {
     nyScr /= d;
   }
   const fr = JULIA_LAMBDA_WHEEL_KNOB_FRAC;
-  knob.style.left = `calc(50% + ${nx * fr}%)`;
-  knob.style.top = `calc(50% + ${nyScr * fr}%)`;
-  wheel.setAttribute("aria-valuetext", `Re ${julia.re.toFixed(4)}, Im ${julia.im.toFixed(4)}`);
+  const vt = `Re ${julia.re.toFixed(4)}, Im ${julia.im.toFixed(4)}`;
+  wheels.forEach((wheel) => {
+    const knob = wheel.querySelector(".juliaLambdaWheelKnob");
+    if (!knob) return;
+    knob.style.left = `calc(50% + ${nx * fr}%)`;
+    knob.style.top = `calc(50% + ${nyScr * fr}%)`;
+    wheel.setAttribute("aria-valuetext", vt);
+  });
 }
 
 /**
  * @param {number} clientX
  * @param {number} clientY
+ * @param {Element | null} [wheelEl]
  */
-function lambdaWheelClientToReIm(clientX, clientY) {
-  const el = juliaLambdaWheel;
+function lambdaWheelClientToReIm(clientX, clientY, wheelEl = juliaLambdaWheel) {
+  const el = wheelEl;
   if (!el) {
     return { re: julia.re, im: julia.im };
   }
@@ -536,13 +628,14 @@ function lambdaWheelClientToReIm(clientX, clientY) {
 /**
  * @param {number} clientX
  * @param {number} clientY
- * @param {{ trackVelocity?: boolean }} [opts]
+ * @param {{ trackVelocity?: boolean; wheelEl?: Element | null }} [opts]
  */
 function applyJuliaLambdaFromWheelClient(clientX, clientY, opts) {
   if (fractalKind !== 1) return;
+  const wheelEl = opts?.wheelEl ?? juliaLambdaWheel;
   const prevRe = julia.re;
   const prevIm = julia.im;
-  const { re, im } = lambdaWheelClientToReIm(clientX, clientY);
+  const { re, im } = lambdaWheelClientToReIm(clientX, clientY, wheelEl);
   julia.re = re;
   julia.im = im;
   if (opts?.trackVelocity && juliaLambdaWheelDrag) {
@@ -562,10 +655,165 @@ function applyJuliaLambdaFromWheelClient(clientX, clientY, opts) {
   invalidateCache();
 }
 
+function clearMobileCanvasGesture() {
+  mobileCanvasPointers.clear();
+  mobileTwoFingerNav = false;
+  mobileLastPinchMid = null;
+  mobileLastPinchDist = 0;
+}
+
 function clearCanvasPointerInteraction() {
   rubber = null;
   rubberPointerId = null;
   juliaLambdaDrag = null;
+  mandelExpDrag = null;
+  clearMobileCanvasGesture();
+}
+
+/**
+ * After changing halfW, set center so the complex point at backing-store (sx,sy) is unchanged.
+ */
+function anchorViewAtScreenPixel(sx, sy, newHalfW) {
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w < 1 || h < 1) return;
+  const target = screenToComplex(sx, sy);
+  view.halfW = newHalfW;
+  const aspect = h / w;
+  const halfH = view.halfW * aspect;
+  view.centerX = target.re + view.halfW - (sx / w) * (2 * view.halfW);
+  view.centerY = target.im + halfH - (sy / h) * (2 * halfH);
+}
+
+function applyMobileTwoFingerPanPinch() {
+  if (mobileCanvasPointers.size < 2) return;
+  const pts = [...mobileCanvasPointers.values()];
+  const p0 = pts[0];
+  const p1 = pts[1];
+  const mx = (p0.sx + p1.sx) / 2;
+  const my = (p0.sy + p1.sy) / 2;
+  const dist = Math.hypot(p1.sx - p0.sx, p1.sy - p0.sy);
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w < 1 || h < 1 || dist < 1e-6) return;
+
+  if (mobileLastPinchMid && mobileLastPinchDist > 1e-6) {
+    const dMx = mx - mobileLastPinchMid.sx;
+    const dMy = my - mobileLastPinchMid.sy;
+    const aspect = h / w;
+    const spanRe = 2 * view.halfW;
+    const spanIm = 2 * view.halfW * aspect;
+    view.centerX -= (spanRe / w) * dMx;
+    view.centerY -= (spanIm / h) * dMy;
+
+    const scale = mobileLastPinchDist / dist;
+    let newHalfW = view.halfW * scale;
+    newHalfW = Math.min(KEYBOARD_HALF_W_MAX, Math.max(KEYBOARD_HALF_W_MIN, newHalfW));
+    anchorViewAtScreenPixel(mx, my, newHalfW);
+  }
+
+  mobileLastPinchMid = { sx: mx, sy: my };
+  mobileLastPinchDist = dist;
+  invalidateCache();
+}
+
+function syncMobileParamDragButtonUI() {
+  if (!mobileParamDragBtn) return;
+  const show = fractalKind === 0 || fractalKind === 1;
+  mobileParamDragBtn.hidden = !show;
+  mobileParamDragBtn.classList.toggle("mobileParamDragBtnActive", mobileParamDragEnabled);
+  mobileParamDragBtn.setAttribute("aria-pressed", mobileParamDragEnabled ? "true" : "false");
+  mobileParamDragBtn.textContent =
+    fractalKind === 0 ? (mobileParamDragEnabled ? "Adjust p (on)" : "Adjust p") : mobileParamDragEnabled ? "Adjust λ (on)" : "Adjust λ";
+}
+
+function syncMobileCollapsiblePanelsForLayout() {
+  const mobile = isMobileTouchLayout();
+  if (juliaLambdaWheelSubPanel) {
+    if (mobile) {
+      juliaLambdaWheelSubPanel.classList.add("juliaSubPanelCollapsed");
+    } else {
+      juliaLambdaWheelSubPanel.classList.remove("juliaSubPanelCollapsed");
+    }
+    syncJuliaLambdaWheelPanelCollapsedUI();
+  }
+  if (juliaTourPathSubPanel) {
+    if (mobile) {
+      juliaTourPathSubPanel.classList.add("juliaSubPanelCollapsed");
+    } else {
+      juliaTourPathSubPanel.classList.remove("juliaSubPanelCollapsed");
+    }
+    syncJuliaTourPathPanelCollapsedUI();
+  }
+}
+
+function syncJuliaLambdaWheelPanelCollapsedUI() {
+  if (!juliaLambdaWheelSubPanel || !juliaLambdaWheelPanelToggle) return;
+  const collapsed = juliaLambdaWheelSubPanel.classList.contains("juliaSubPanelCollapsed");
+  juliaLambdaWheelPanelToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  juliaLambdaWheelPanelToggle.setAttribute(
+    "aria-label",
+    collapsed ? "Expand λ disk" : "Collapse λ disk",
+  );
+  juliaLambdaWheelPanelToggle.title = collapsed ? "Show λ disk" : "Hide λ disk";
+}
+
+function syncJuliaTourPathPanelCollapsedUI() {
+  if (!juliaTourPathSubPanel || !juliaTourPathPanelToggle) return;
+  const collapsed = juliaTourPathSubPanel.classList.contains("juliaSubPanelCollapsed");
+  juliaTourPathPanelToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  juliaTourPathPanelToggle.setAttribute(
+    "aria-label",
+    collapsed ? "Expand path & λ step controls" : "Collapse path & λ step controls",
+  );
+  juliaTourPathPanelToggle.title = collapsed ? "Path, random walk, λ step" : "Hide path details";
+}
+
+function initJuliaLambdaWheelPanelCollapse() {
+  if (!juliaLambdaWheelSubPanel || !juliaLambdaWheelPanelToggle) return;
+  syncJuliaLambdaWheelPanelCollapsedUI();
+  juliaLambdaWheelPanelToggle.addEventListener("click", () => {
+    juliaLambdaWheelSubPanel.classList.toggle("juliaSubPanelCollapsed");
+    syncJuliaLambdaWheelPanelCollapsedUI();
+  });
+}
+
+function initJuliaTourPathPanelCollapse() {
+  if (!juliaTourPathSubPanel || !juliaTourPathPanelToggle) return;
+  syncJuliaTourPathPanelCollapsedUI();
+  juliaTourPathPanelToggle.addEventListener("click", () => {
+    juliaTourPathSubPanel.classList.toggle("juliaSubPanelCollapsed");
+    syncJuliaTourPathPanelCollapsedUI();
+  });
+}
+
+/** Updated in `onMobileLayoutChange` / `main` so we only reset the HUD when crossing the mobile breakpoint. */
+let wasMobileTouchLayout = false;
+
+/** Coalesce matchMedia notifications: real phones often fire many in one frame when UI chrome resizes. */
+let mobileLayoutChangeRaf = 0;
+function scheduleOnMobileLayoutChange() {
+  if (mobileLayoutChangeRaf) return;
+  mobileLayoutChangeRaf = requestAnimationFrame(() => {
+    mobileLayoutChangeRaf = 0;
+    onMobileLayoutChange();
+  });
+}
+
+function onMobileLayoutChange() {
+  clearCanvasPointerInteraction();
+  syncMobileCollapsiblePanelsForLayout();
+  syncMobileParamDragButtonUI();
+  const m = isMobileTouchLayout();
+  if (m && !wasMobileTouchLayout) {
+    hudEl?.classList.add("hudMobileAdvancedCollapsed");
+    hudMobileAdvancedToggle?.setAttribute("aria-expanded", "false");
+  } else if (!m && wasMobileTouchLayout) {
+    hudEl?.classList.remove("hudMobileAdvancedCollapsed");
+    hudMobileAdvancedToggle?.setAttribute("aria-expanded", "true");
+  }
+  wasMobileTouchLayout = m;
+  syncAllHudSelectUi();
 }
 
 function clearJiggleSnapState() {
@@ -1075,6 +1323,25 @@ function updateJuliaTourControlsUI() {
     juliaTourPauseBtn.disabled = !hasTour || !!juliaLambdaTour?.paused;
   }
 
+  if (juliaTourPlayPauseBtn) {
+    juliaTourPlayPauseBtn.disabled = false;
+    const showPause = playing;
+    juliaTourPlayPauseBtn.setAttribute(
+      "aria-label",
+      showPause ? "Pause tour" : hasTour ? "Resume tour" : "Play tour",
+    );
+    const iconPlay = juliaTourPlayPauseBtn.querySelector(".juliaTourPlayPauseIconPlay");
+    const iconPause = juliaTourPlayPauseBtn.querySelector(".juliaTourPlayPauseIconPause");
+    if (iconPlay) {
+      if (showPause) iconPlay.setAttribute("hidden", "");
+      else iconPlay.removeAttribute("hidden");
+    }
+    if (iconPause) {
+      if (!showPause) iconPause.setAttribute("hidden", "");
+      else iconPause.removeAttribute("hidden");
+    }
+  }
+
   const speedActive = juliaLambdaTour?.speedMult ?? juliaTourSpeedMult;
   juliaTourSpeedBtns.forEach((btn) => {
     const v = Number(btn.getAttribute("data-speed"));
@@ -1083,17 +1350,16 @@ function updateJuliaTourControlsUI() {
 
   const dr = juliaTourPadStep(juliaLambdaTour?.dirRe ?? juliaTourDirRe);
   const di = juliaTourPadStep(juliaLambdaTour?.dirIm ?? juliaTourDirIm);
+  const padLabel = `λ step pad. Active: ${juliaTourAxisDeltaLabel("Re", dr)}, ${juliaTourAxisDeltaLabel("Im", di)}`;
 
-  juliaTourDirPad?.setAttribute(
-    "aria-label",
-    `λ step pad. Active: ${juliaTourAxisDeltaLabel("Re", dr)}, ${juliaTourAxisDeltaLabel("Im", di)}`,
-  );
-
-  juliaTourDirPad?.querySelectorAll(".juliaTourDirCell").forEach((cell) => {
-    const el = /** @type {HTMLElement} */ (cell);
-    const cr = juliaTourPadStep(Number(el.getAttribute("data-dre")));
-    const ci = juliaTourPadStep(Number(el.getAttribute("data-dim")));
-    el.classList.toggle("juliaTourDirCellActive", cr === dr && ci === di);
+  document.querySelectorAll(".juliaTourDirPad").forEach((pad) => {
+    pad.setAttribute("aria-label", padLabel);
+    pad.querySelectorAll(".juliaTourDirCell").forEach((cell) => {
+      const el = /** @type {HTMLElement} */ (cell);
+      const cr = juliaTourPadStep(Number(el.getAttribute("data-dre")));
+      const ci = juliaTourPadStep(Number(el.getAttribute("data-dim")));
+      el.classList.toggle("juliaTourDirCellActive", cr === dr && ci === di);
+    });
   });
 }
 
@@ -1452,10 +1718,14 @@ function syncParamsFromInputs() {
 }
 
 function updateFractalPanelsVisibility() {
-  juliaPanel.hidden = fractalKind !== 1;
+  if (juliaPanel) juliaPanel.hidden = fractalKind !== 1;
   if (mandelPanel) {
     mandelPanel.hidden = fractalKind !== 0;
   }
+  if (juliaMobileTourBar) {
+    juliaMobileTourBar.hidden = fractalKind !== 1;
+  }
+  syncMobileParamDragButtonUI();
 }
 
 function buildFingerprint() {
@@ -1744,9 +2014,11 @@ function frame() {
     ms = fullRenderAndCommit();
   }
 
-  uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
-  if (uiChromeVisible) drawViewOverlay();
-  drawRubberOverlay();
+  if (uiCtx) {
+    uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
+    if (uiChromeVisible) drawViewOverlay();
+    drawRubberOverlay();
+  }
 
   const tag = gpuRenderer?.usedGpuPerturb ? " · GPU perturb" : "";
   const tourTag =
@@ -1755,16 +2027,17 @@ function frame() {
         ? " · λ tour (paused)"
         : " · λ tour"
       : "";
-  statusEl.textContent =
-    ms > 0
-      ? `${cw}×${ch}${tag} · ${ms.toFixed(1)} ms${tourTag}`
-      : `${cw}×${ch}${tag}${tourTag}`;
+  if (statusEl) {
+    statusEl.textContent =
+      ms > 0
+        ? `${cw}×${ch}${tag} · ${ms.toFixed(1)} ms${tourTag}`
+        : `${cw}×${ch}${tag}${tourTag}`;
+  }
 
   requestAnimationFrame(frame);
 }
 
-uiCanvas.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0) return;
+function handleDesktopUiCanvasPointerDown(e) {
   uiCanvas.setPointerCapture(e.pointerId);
   rubberPointerId = e.pointerId;
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
@@ -1799,9 +2072,77 @@ uiCanvas.addEventListener("pointerdown", (e) => {
   juliaLambdaDrag = null;
   mandelExpDrag = null;
   rubber = { x0: sx, y0: sy, x1: sx, y1: sy };
+}
+
+function handleMobileUiCanvasPointerDown(e) {
+  const { sx, sy } = canvasCoords(e.clientX, e.clientY);
+  try {
+    uiCanvas.setPointerCapture(e.pointerId);
+  } catch {
+    /* ignore */
+  }
+  mobileCanvasPointers.set(e.pointerId, { sx, sy });
+
+  if (mobileCanvasPointers.size >= 2) {
+    if (juliaLambdaDrag) {
+      const r = juliaLambdaDrag.resumeTourAfter;
+      endJuliaLambdaDragFromPointer(!!r);
+    }
+    mandelExpDrag = null;
+    rubber = null;
+    rubberPointerId = null;
+    juliaLambdaDrag = null;
+    mobileTwoFingerNav = true;
+    mobileLastPinchMid = null;
+    mobileLastPinchDist = 0;
+    return;
+  }
+
+  rubberPointerId = e.pointerId;
+
+  if (mobileParamDragEnabled && fractalKind === 1 && juliaCanvasModeIsLambdaDrag()) {
+    rubber = null;
+    clearJiggleSnapState();
+    let resumeTourAfter = false;
+    if (juliaLambdaTour) {
+      resumeTourAfter = !juliaLambdaTour.paused;
+      juliaLambdaTour.paused = true;
+      updateJuliaTourControlsUI();
+    }
+    juliaLambdaDrag = {
+      pointerId: e.pointerId,
+      lastSx: sx,
+      lastSy: sy,
+      resumeTourAfter,
+      lastMoveT: 0,
+      velRe: 0,
+      velIm: 0,
+      lastDRe: 0,
+      lastDIm: 0,
+    };
+    return;
+  }
+  if (mobileParamDragEnabled && fractalKind === 0 && mandelCanvasModeIsExpDrag()) {
+    rubber = null;
+    juliaLambdaDrag = null;
+    mandelExpDrag = { pointerId: e.pointerId, lastSx: sx, lastSy: sy };
+    return;
+  }
+  juliaLambdaDrag = null;
+  mandelExpDrag = null;
+  rubber = null;
+}
+
+uiCanvas.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  if (isMobileTouchLayout()) {
+    handleMobileUiCanvasPointerDown(e);
+    return;
+  }
+  handleDesktopUiCanvasPointerDown(e);
 });
 
-uiCanvas.addEventListener("pointermove", (e) => {
+function handleDesktopUiCanvasPointerMove(e) {
   if (e.pointerId !== rubberPointerId) return;
   const { sx, sy } = canvasCoords(e.clientX, e.clientY);
   if (juliaLambdaDrag) {
@@ -1840,11 +2181,68 @@ uiCanvas.addEventListener("pointermove", (e) => {
   if (rubber === null) return;
   rubber.x1 = sx;
   rubber.y1 = sy;
+}
+
+function handleMobileUiCanvasPointerMove(e) {
+  if (!mobileCanvasPointers.has(e.pointerId)) return;
+  const { sx, sy } = canvasCoords(e.clientX, e.clientY);
+  mobileCanvasPointers.set(e.pointerId, { sx, sy });
+
+  if (mobileTwoFingerNav && mobileCanvasPointers.size >= 2) {
+    applyMobileTwoFingerPanPinch();
+    return;
+  }
+
+  if (e.pointerId !== rubberPointerId) return;
+  if (juliaLambdaDrag) {
+    const dx = sx - juliaLambdaDrag.lastSx;
+    const dy = sy - juliaLambdaDrag.lastSy;
+    const mult = e.shiftKey ? JULIA_LAMBDA_SHIFT_MULT : 1;
+    const step = JULIA_LAMBDA_PER_CANVAS_PX * mult;
+    const dRe = dx * step;
+    const dIm = dy * step;
+    const now = performance.now();
+    if (juliaLambdaDrag.lastMoveT > 0) {
+      const dtSec = Math.max(1e-4, (now - juliaLambdaDrag.lastMoveT) / 1000);
+      juliaLambdaDrag.velRe = dRe / dtSec;
+      juliaLambdaDrag.velIm = dIm / dtSec;
+    }
+    juliaLambdaDrag.lastMoveT = now;
+    juliaLambdaDrag.lastDRe = dRe;
+    juliaLambdaDrag.lastDIm = dIm;
+    julia.re = clampJuliaComponent(julia.re + dRe);
+    julia.im = clampJuliaComponent(julia.im + dIm);
+    syncJuliaHudFromJuliaState();
+    juliaLambdaDrag.lastSx = sx;
+    juliaLambdaDrag.lastSy = sy;
+    invalidateCache();
+    return;
+  }
+  if (mandelExpDrag) {
+    const dx = sx - mandelExpDrag.lastSx;
+    const mult = e.shiftKey ? MANDEL_EXP_SHIFT_MULT : 1;
+    mandelExponent = clampMandelExponent(mandelExponent + dx * MANDEL_EXP_PER_CANVAS_PX * mult);
+    mandelExpDrag.lastSx = sx;
+    mandelExpDrag.lastSy = sy;
+    invalidateCache();
+  }
+}
+
+uiCanvas.addEventListener("pointermove", (e) => {
+  if (isMobileTouchLayout()) {
+    handleMobileUiCanvasPointerMove(e);
+    return;
+  }
+  handleDesktopUiCanvasPointerMove(e);
 });
 
-uiCanvas.addEventListener("pointerup", (e) => {
+function handleDesktopUiCanvasPointerUp(e) {
   if (e.pointerId !== rubberPointerId) return;
-  uiCanvas.releasePointerCapture(e.pointerId);
+  try {
+    uiCanvas.releasePointerCapture(e.pointerId);
+  } catch {
+    /* already released */
+  }
   rubberPointerId = null;
 
   if (juliaLambdaDrag) {
@@ -1871,9 +2269,53 @@ uiCanvas.addEventListener("pointerup", (e) => {
   view.centerY = toView.centerY;
   view.halfW = toView.halfW;
   fullRenderAndCommit();
+}
+
+function handleMobileUiCanvasPointerUp(e) {
+  try {
+    uiCanvas.releasePointerCapture(e.pointerId);
+  } catch {
+    /* already released */
+  }
+
+  const resumeTour = juliaLambdaDrag?.resumeTourAfter;
+  const hadLambda = juliaLambdaDrag && juliaLambdaDrag.pointerId === e.pointerId;
+  const hadMandel = mandelExpDrag && mandelExpDrag.pointerId === e.pointerId;
+
+  mobileCanvasPointers.delete(e.pointerId);
+
+  if (mobileCanvasPointers.size < 2) {
+    mobileTwoFingerNav = false;
+    mobileLastPinchMid = null;
+    mobileLastPinchDist = 0;
+  }
+
+  if (hadLambda) {
+    rubberPointerId = mobileCanvasPointers.size === 1 ? [...mobileCanvasPointers.keys()][0] : null;
+    endJuliaLambdaDragFromPointer(!!resumeTour);
+    return;
+  }
+  if (hadMandel) {
+    mandelExpDrag = null;
+    rubberPointerId = mobileCanvasPointers.size === 1 ? [...mobileCanvasPointers.keys()][0] : null;
+    return;
+  }
+
+  if (mobileCanvasPointers.size === 0) {
+    rubberPointerId = null;
+  }
+}
+
+uiCanvas.addEventListener("pointerup", (e) => {
+  if (e.button !== 0) return;
+  if (isMobileTouchLayout()) {
+    handleMobileUiCanvasPointerUp(e);
+    return;
+  }
+  handleDesktopUiCanvasPointerUp(e);
 });
 
-uiCanvas.addEventListener("pointercancel", (e) => {
+function handleDesktopUiCanvasPointerCancel(e) {
   if (rubberPointerId !== e.pointerId) return;
   try {
     uiCanvas.releasePointerCapture(e.pointerId);
@@ -1887,6 +2329,39 @@ uiCanvas.addEventListener("pointercancel", (e) => {
     endJuliaLambdaDragFromPointer(!!resumeTour);
   }
   clearCanvasPointerInteraction();
+}
+
+function handleMobileUiCanvasPointerCancel(e) {
+  try {
+    uiCanvas.releasePointerCapture(e.pointerId);
+  } catch {
+    /* already released */
+  }
+  mobileCanvasPointers.delete(e.pointerId);
+  if (mobileCanvasPointers.size < 2) {
+    mobileTwoFingerNav = false;
+    mobileLastPinchMid = null;
+    mobileLastPinchDist = 0;
+  }
+  if (juliaLambdaDrag && juliaLambdaDrag.pointerId === e.pointerId) {
+    endJuliaLambdaDragFromPointer(!!juliaLambdaDrag.resumeTourAfter);
+  }
+  if (mandelExpDrag && mandelExpDrag.pointerId === e.pointerId) {
+    mandelExpDrag = null;
+  }
+  if (mobileCanvasPointers.size === 0) {
+    rubberPointerId = null;
+    rubber = null;
+    juliaLambdaDrag = null;
+  }
+}
+
+uiCanvas.addEventListener("pointercancel", (e) => {
+  if (isMobileTouchLayout()) {
+    handleMobileUiCanvasPointerCancel(e);
+    return;
+  }
+  handleDesktopUiCanvasPointerCancel(e);
 });
 
 resetViewBtn.addEventListener("click", () => {
@@ -1911,10 +2386,158 @@ nextPresetBtn.addEventListener("click", () => {
   fullRenderAndCommit();
 });
 
-fractalSelect.addEventListener("change", () => {
+function clearHudMenuListGeometry(list) {
+  if (!list) return;
+  list.style.position = "";
+  list.style.left = "";
+  list.style.top = "";
+  list.style.width = "";
+  list.style.right = "";
+  list.style.zIndex = "";
+}
+
+function positionHudMenuList(anchor, list) {
+  const r = anchor.getBoundingClientRect();
+  list.style.position = "fixed";
+  list.style.left = `${r.left}px`;
+  list.style.top = `${r.top + r.height + 4}px`;
+  list.style.width = `${r.width}px`;
+  list.style.right = "auto";
+  list.style.zIndex = "9999";
+}
+
+function closeHudCustomSelectMenus() {
+  const fractalList = document.getElementById("fractalMenuList");
+  const paletteList = document.getElementById("paletteMenuList");
+  const fractalBtn = document.getElementById("fractalMenuBtn");
+  const paletteBtn = document.getElementById("paletteMenuBtn");
+  clearHudMenuListGeometry(fractalList);
+  clearHudMenuListGeometry(paletteList);
+  if (fractalList) fractalList.hidden = true;
+  if (paletteList) paletteList.hidden = true;
+  fractalBtn?.setAttribute("aria-expanded", "false");
+  paletteBtn?.setAttribute("aria-expanded", "false");
+}
+
+/** Off-screen `#fractal` / `#palette` are canonical; mirror to desktop `<select>` + mobile menu button labels. */
+function syncAllHudSelectUi() {
+  const fd = /** @type {HTMLSelectElement | null} */ (document.getElementById("fractalHudDesktop"));
+  const pd = /** @type {HTMLSelectElement | null} */ (document.getElementById("paletteHudDesktop"));
+  if (fd && fractalSelect && fd.value !== fractalSelect.value) fd.value = fractalSelect.value;
+  if (pd && paletteSelect && pd.value !== paletteSelect.value) pd.value = paletteSelect.value;
+  const fractalLbl = document.getElementById("fractalMenuBtnLabel");
+  const paletteLbl = document.getElementById("paletteMenuBtnLabel");
+  if (fractalSelect && fractalLbl) {
+    const o = fractalSelect.selectedOptions[0];
+    if (o) fractalLbl.textContent = o.textContent;
+  }
+  if (paletteSelect && paletteLbl) {
+    const o = paletteSelect.selectedOptions[0];
+    if (o) paletteLbl.textContent = o.textContent;
+  }
+}
+
+/** @param {HTMLSelectElement | null} hud @param {HTMLSelectElement | null} canonical */
+function wireHudSelectToCanonical(hud, canonical) {
+  if (!hud || !canonical) return;
+  hud.addEventListener("change", () => {
+    if (hud.value === canonical.value) return;
+    canonical.value = hud.value;
+    canonical.dispatchEvent(new Event("change", { bubbles: false }));
+  });
+}
+
+function wireDesktopHudSelects() {
+  wireHudSelectToCanonical(
+    /** @type {HTMLSelectElement | null} */ (document.getElementById("fractalHudDesktop")),
+    fractalSelect,
+  );
+  wireHudSelectToCanonical(
+    /** @type {HTMLSelectElement | null} */ (document.getElementById("paletteHudDesktop")),
+    paletteSelect,
+  );
+}
+
+/**
+ * @param {{
+ *   btn: HTMLButtonElement;
+ *   list: HTMLElement;
+ *   canonical: HTMLSelectElement;
+ * }} cfg
+ */
+function wireOneHudCustomMenu(cfg) {
+  const { btn, list, canonical } = cfg;
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const opening = list.hidden;
+    closeHudCustomSelectMenus();
+    if (opening) {
+      positionHudMenuList(btn, list);
+      list.hidden = false;
+      btn.setAttribute("aria-expanded", "true");
+    }
+  });
+  list.querySelectorAll("[data-value]").forEach((optBtn) => {
+    optBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const v = optBtn.getAttribute("data-value");
+      if (v == null) return;
+      if (canonical.value !== v) canonical.value = v;
+      canonical.dispatchEvent(new Event("change", { bubbles: false }));
+      closeHudCustomSelectMenus();
+      syncAllHudSelectUi();
+    });
+  });
+}
+
+/** Mobile-only custom menus (see `.showMobileOnly` in index.html); canonical values stay in `#fractal` / `#palette`. */
+function wireHudCustomSelectMenus() {
+  const fractalBtn = document.getElementById("fractalMenuBtn");
+  const fractalList = document.getElementById("fractalMenuList");
+  const paletteBtn = document.getElementById("paletteMenuBtn");
+  const paletteList = document.getElementById("paletteMenuList");
+  if (!fractalSelect || !paletteSelect || !fractalBtn || !fractalList || !paletteBtn || !paletteList) return;
+
+  syncAllHudSelectUi();
+  wireOneHudCustomMenu({ btn: fractalBtn, list: fractalList, canonical: fractalSelect });
+  wireOneHudCustomMenu({ btn: paletteBtn, list: paletteList, canonical: paletteSelect });
+
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      const t = /** @type {HTMLElement | null} */ (e.target);
+      if (t?.closest?.(".hudCustomSelect")) return;
+      closeHudCustomSelectMenus();
+    },
+    true,
+  );
+
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Escape") closeHudCustomSelectMenus();
+  });
+
+  window.addEventListener("resize", closeHudCustomSelectMenus);
+  hudEl?.addEventListener(
+    "scroll",
+    () => {
+      if (!fractalList.hidden) positionHudMenuList(fractalBtn, fractalList);
+      if (!paletteList.hidden) positionHudMenuList(paletteBtn, paletteList);
+    },
+    { passive: true },
+  );
+}
+
+/**
+ * Read off-screen `#fractal` and sync tour, panels, and render params.
+ * Deferred slightly so layout stays out of the same turn as UI chrome updates.
+ */
+function applyFractalSelectChangeFromUi() {
   let fk = Number(fractalSelect.value);
   if (fk === 3 || !Number.isFinite(fk)) fk = 0;
-  fractalSelect.value = String(fk);
+  const nextVal = String(fk);
+  if (fractalSelect.value !== nextVal) fractalSelect.value = nextVal;
   fractalKind = fk;
   mandelExponent = 2;
   stopJuliaLambdaTour();
@@ -1922,11 +2545,25 @@ fractalSelect.addEventListener("change", () => {
   clearCanvasPointerInteraction();
   updateFractalPanelsVisibility();
   syncParamsFromInputs();
+  if (isMobileTouchLayout() && mobileParamDragEnabled) {
+    if (fractalKind === 0) setMandelCanvasMode("exp");
+    if (fractalKind === 1) setJuliaCanvasMode("lambda");
+  }
+  syncAllHudSelectUi();
+}
+
+fractalSelect.addEventListener("change", () => {
+  setTimeout(applyFractalSelectChangeFromUi, 0);
 });
 
 paletteSelect.addEventListener("change", () => {
   invalidateCache();
+  syncAllHudSelectUi();
 });
+
+wireDesktopHudSelects();
+wireHudCustomSelectMenus();
+syncAllHudSelectUi();
 
 juliaReInput.addEventListener("input", () => {
   if (syncingJuliaInputsFromState) return;
@@ -1940,36 +2577,40 @@ juliaImInput.addEventListener("input", () => {
   syncParamsFromInputs();
 });
 
-juliaLambdaWheel?.addEventListener("pointerdown", (e) => {
-  if (fractalKind !== 1) return;
-  if (e.button != null && e.button !== 0) return;
-  e.preventDefault();
-  stopJuliaLambdaTour();
-  juliaLambdaWheelDrag = {
-    lastMoveT: 0,
-    velRe: 0,
-    velIm: 0,
-    lastDRe: 0,
-    lastDIm: 0,
-  };
-  juliaLambdaWheel.setPointerCapture(e.pointerId);
-  applyJuliaLambdaFromWheelClient(e.clientX, e.clientY);
-});
-
-juliaLambdaWheel?.addEventListener("pointermove", (e) => {
-  if (!juliaLambdaWheel?.hasPointerCapture(e.pointerId)) return;
-  e.preventDefault();
-  applyJuliaLambdaFromWheelClient(e.clientX, e.clientY, { trackVelocity: true });
+document.querySelectorAll(".juliaLambdaWheel").forEach((wheel) => {
+  wheel.addEventListener("pointerdown", (e) => {
+    if (fractalKind !== 1) return;
+    if (e.button != null && e.button !== 0) return;
+    e.preventDefault();
+    stopJuliaLambdaTour();
+    const w = /** @type {HTMLElement} */ (e.currentTarget);
+    juliaLambdaWheelDrag = {
+      wheelEl: w,
+      lastMoveT: 0,
+      velRe: 0,
+      velIm: 0,
+      lastDRe: 0,
+      lastDIm: 0,
+    };
+    w.setPointerCapture(e.pointerId);
+    applyJuliaLambdaFromWheelClient(e.clientX, e.clientY, { wheelEl: w });
+  });
+  wheel.addEventListener("pointermove", (e) => {
+    const w = /** @type {HTMLElement} */ (e.currentTarget);
+    if (!juliaLambdaWheelDrag?.wheelEl || !w.hasPointerCapture(e.pointerId)) return;
+    e.preventDefault();
+    applyJuliaLambdaFromWheelClient(e.clientX, e.clientY, { trackVelocity: true, wheelEl: w });
+  });
+  wheel.addEventListener("pointerup", releaseJuliaLambdaWheelPointer);
+  wheel.addEventListener("pointercancel", releaseJuliaLambdaWheelPointer);
 });
 
 function releaseJuliaLambdaWheelPointer(e) {
-  if (!juliaLambdaWheel?.hasPointerCapture(e.pointerId)) return;
-  juliaLambdaWheel.releasePointerCapture(e.pointerId);
+  const w = juliaLambdaWheelDrag?.wheelEl;
+  if (!w || !w.hasPointerCapture(e.pointerId)) return;
+  w.releasePointerCapture(e.pointerId);
   endJuliaLambdaWheelDragFromPointer();
 }
-
-juliaLambdaWheel?.addEventListener("pointerup", releaseJuliaLambdaWheelPointer);
-juliaLambdaWheel?.addEventListener("pointercancel", releaseJuliaLambdaWheelPointer);
 
 juliaModeBoxBtn?.addEventListener("click", () => setJuliaCanvasMode("box"));
 juliaModeLambdaBtn?.addEventListener("click", () => setJuliaCanvasMode("lambda"));
@@ -1984,13 +2625,30 @@ juliaTourPauseBtn?.addEventListener("click", () => {
   pauseJuliaLambdaTourFromUi();
 });
 
-juliaTourDirPad?.addEventListener("click", (e) => {
-  const btn = e.target?.closest?.(".juliaTourDirCell");
-  if (!btn || !juliaTourDirPad?.contains(btn)) return;
-  const re = Number(btn.getAttribute("data-dre"));
-  const im = Number(btn.getAttribute("data-dim"));
-  if (!Number.isFinite(re) || !Number.isFinite(im)) return;
-  applyJuliaTourDirFromPadClick(re, im);
+juliaTourPlayPauseBtn?.addEventListener("click", () => {
+  const playing = !!(juliaLambdaTour && !juliaLambdaTour.paused);
+  if (playing) {
+    pauseJuliaLambdaTourFromUi();
+  } else {
+    playJuliaLambdaTourFromUi();
+  }
+});
+
+hudMobileAdvancedToggle?.addEventListener("click", () => {
+  if (!hudEl) return;
+  const collapsed = hudEl.classList.toggle("hudMobileAdvancedCollapsed");
+  hudMobileAdvancedToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+});
+
+document.querySelectorAll(".juliaTourDirPad").forEach((pad) => {
+  pad.addEventListener("click", (e) => {
+    const btn = e.target?.closest?.(".juliaTourDirCell");
+    if (!btn || !pad.contains(btn)) return;
+    const re = Number(btn.getAttribute("data-dre"));
+    const im = Number(btn.getAttribute("data-dim"));
+    if (!Number.isFinite(re) || !Number.isFinite(im)) return;
+    applyJuliaTourDirFromPadClick(re, im);
+  });
 });
 
 juliaTourSpeedBtns.forEach((btn) => {
@@ -2124,7 +2782,7 @@ function scheduleSyncStackPixelSize() {
 
 async function main() {
   if (!webGpuSupported()) {
-    statusEl.textContent = "WebGPU is required (enable in browser / use Chromium).";
+    showFatalLoadError("WebGPU not available", webGpuMissingUserMessage());
     return;
   }
 
@@ -2134,12 +2792,40 @@ async function main() {
   updateFractalPanelsVisibility();
   setJuliaCanvasMode("lambda");
   setMandelCanvasMode("box");
+  if (isMobileTouchLayout() && mobileParamDragEnabled && fractalKind === 0) {
+    setMandelCanvasMode("exp");
+  }
   updateJuliaPathModeButtonsUI();
   updateJuliaTourControlsUI();
   wireJigglePhysicsSliders();
   syncJigglePhysicsFromInputs();
   updateJuliaJiggleSnapToggleUI();
   initJuliaJigglePanelCollapse();
+  initJuliaLambdaWheelPanelCollapse();
+  initJuliaTourPathPanelCollapse();
+  syncMobileCollapsiblePanelsForLayout();
+  syncMobileParamDragButtonUI();
+  wasMobileTouchLayout = isMobileTouchLayout();
+  if (wasMobileTouchLayout) {
+    hudEl?.classList.add("hudMobileAdvancedCollapsed");
+    hudMobileAdvancedToggle?.setAttribute("aria-expanded", "false");
+  }
+  mobileParamDragBtn?.addEventListener("click", () => {
+    mobileParamDragEnabled = !mobileParamDragEnabled;
+    if (mobileParamDragEnabled) {
+      if (fractalKind === 0) setMandelCanvasMode("exp");
+      if (fractalKind === 1) setJuliaCanvasMode("lambda");
+    } else {
+      if (fractalKind === 0) setMandelCanvasMode("box");
+      if (fractalKind === 1) setJuliaCanvasMode("box");
+    }
+    syncMobileParamDragButtonUI();
+  });
+  if (typeof mobileLayoutMql.addEventListener === "function") {
+    mobileLayoutMql.addEventListener("change", scheduleOnMobileLayoutChange);
+  } else {
+    mobileLayoutMql.addListener(scheduleOnMobileLayoutChange);
+  }
 
   try {
     gpuRenderer = await createFractalGpuRenderer(
@@ -2151,7 +2837,7 @@ async function main() {
     );
   } catch (err) {
     console.error(err);
-    statusEl.textContent = "WebGPU failed to initialize.";
+    showFatalLoadError("WebGPU failed to initialize", err);
     return;
   }
 
@@ -2176,6 +2862,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  statusEl.textContent = "WASM failed to load.";
+  showFatalLoadError("Startup failed (WASM load or early init)", err);
   console.error(err);
 });

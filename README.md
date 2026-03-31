@@ -60,6 +60,23 @@ Then open the URL shown in the terminal.
 
 Do not open `index.html` directly from the file system (`file://`): ES module imports and WASM fetch require a local HTTP server.
 
+### HTTPS on your LAN (phones, WebGPU)
+
+WebGPU is only exposed in a **secure context**. Plain `http://192.168.x.x` from `npx serve` hides `navigator.gpu` on the phone even when GitHub Pages works.
+
+From the repo root:
+
+```bash
+npm install
+npm run dev:https
+```
+
+Open the printed `https://YOUR-LAN-IP:3443` on the phone. The first run creates a **self-signed** cert in `dev-certs/` (gitignored) with SAN entries for `localhost`, `127.0.0.1`, and your current LAN IPv4 addresses, plus standard TLS extensions so strict clients (e.g. iOS Safari) accept the connection. **Trust `dev-certs/cert.pem` on the phone** (e.g. AirDrop the file to iPhone, install the profile, then enable full trust under Settings → General → About → Certificate Trust Settings). If your Wi‑Fi IP changes, run `npm run dev:https:regen` and trust the new cert.
+
+If you still see a TLS / “secure connection failed” error after pulling updates, run `npm run dev:https` again (certs auto-regenerate when the dev format version changes) and re-install trust for the new `cert.pem`.
+
+Optional: set `DEV_HTTPS_PORT` to use a port other than `3443`.
+
 ## Browser note
 
 The live app **requires WebGPU** (recent Chromium, Edge, or another WebGPU-capable browser). If the GPU path fails to start, the status line shows an error.
