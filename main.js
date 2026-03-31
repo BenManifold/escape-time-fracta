@@ -50,9 +50,9 @@ const JULIA_TOUR_DPHASE_RAD = 5e-8;
 /** Im uses phase * this factor so Re/Im don’t stay locked in phase. */
 const JULIA_TOUR_IM_PHASE_MUL = 0.618033988749895;
 /** Upper bound for global φ scan on resync (Lissajous is quasi-periodic; wide span avoids wrong local minima). */
-const JULIA_TOUR_RESYNC_PHI_MAX = 3000 * Math.PI
+const JULIA_TOUR_RESYNC_PHI_MAX = 3000 * Math.PI;
 /** Min half-width of Lissajous box per axis (λ at a face still gets a tiny oscillation). */
-const JULIA_TOUR_MIN_BOX_HALF = 0.02
+const JULIA_TOUR_MIN_BOX_HALF = 0.02;
 
 /** Random-walk: ms between independent Re/Im step picks (−1, 0, +1 per axis). */
 const JULIA_RW_CHOICE_MS = 5000;
@@ -596,10 +596,6 @@ function updateJuliaLambdaWheelVisual() {
 /**
  * @param {number} clientX
  * @param {number} clientY
- */
-/**
- * @param {number} clientX
- * @param {number} clientY
  * @param {Element | null} [wheelEl]
  */
 function lambdaWheelClientToReIm(clientX, clientY, wheelEl = juliaLambdaWheel) {
@@ -632,13 +628,14 @@ function lambdaWheelClientToReIm(clientX, clientY, wheelEl = juliaLambdaWheel) {
 /**
  * @param {number} clientX
  * @param {number} clientY
- * @param {{ trackVelocity?: boolean }} [opts]
+ * @param {{ trackVelocity?: boolean; wheelEl?: Element | null }} [opts]
  */
 function applyJuliaLambdaFromWheelClient(clientX, clientY, opts) {
   if (fractalKind !== 1) return;
+  const wheelEl = opts?.wheelEl ?? juliaLambdaWheel;
   const prevRe = julia.re;
   const prevIm = julia.im;
-  const { re, im } = lambdaWheelClientToReIm(clientX, clientY);
+  const { re, im } = lambdaWheelClientToReIm(clientX, clientY, wheelEl);
   julia.re = re;
   julia.im = im;
   if (opts?.trackVelocity && juliaLambdaWheelDrag) {
@@ -2422,7 +2419,12 @@ function closeHudCustomSelectMenus() {
   paletteBtn?.setAttribute("aria-expanded", "false");
 }
 
-function syncHudCustomSelectLabels() {
+/** Off-screen `#fractal` / `#palette` are canonical; mirror to desktop `<select>` + mobile menu button labels. */
+function syncAllHudSelectUi() {
+  const fd = /** @type {HTMLSelectElement | null} */ (document.getElementById("fractalHudDesktop"));
+  const pd = /** @type {HTMLSelectElement | null} */ (document.getElementById("paletteHudDesktop"));
+  if (fd && fractalSelect && fd.value !== fractalSelect.value) fd.value = fractalSelect.value;
+  if (pd && paletteSelect && pd.value !== paletteSelect.value) pd.value = paletteSelect.value;
   const fractalLbl = document.getElementById("fractalMenuBtnLabel");
   const paletteLbl = document.getElementById("paletteMenuBtnLabel");
   if (fractalSelect && fractalLbl) {
@@ -2435,32 +2437,62 @@ function syncHudCustomSelectLabels() {
   }
 }
 
-/** Canonical state lives in off-screen `#fractal` / `#palette`; mirror to desktop HUD selects + mobile button labels. */
-function syncAllHudSelectUi() {
-  const fd = document.getElementById("fractalHudDesktop");
-  const pd = document.getElementById("paletteHudDesktop");
-  if (fd && fractalSelect && fd.value !== fractalSelect.value) fd.value = fractalSelect.value;
-  if (pd && paletteSelect && pd.value !== paletteSelect.value) pd.value = paletteSelect.value;
-  syncHudCustomSelectLabels();
+/** @param {HTMLSelectElement | null} hud @param {HTMLSelectElement | null} canonical */
+function wireHudSelectToCanonical(hud, canonical) {
+  if (!hud || !canonical) return;
+  hud.addEventListener("change", () => {
+    if (hud.value === canonical.value) return;
+    canonical.value = hud.value;
+    canonical.dispatchEvent(new Event("change", { bubbles: false }));
+  });
 }
 
-/** Wide layout: native in-HUD `<select>` → off-screen hooks (see `#fractalHudDesktop`). */
 function wireDesktopHudSelects() {
-  const fd = document.getElementById("fractalHudDesktop");
-  const pd = document.getElementById("paletteHudDesktop");
-  fd?.addEventListener("change", () => {
-    if (!fractalSelect || fd.value === fractalSelect.value) return;
-    fractalSelect.value = fd.value;
-    fractalSelect.dispatchEvent(new Event("change", { bubbles: false }));
+  wireHudSelectToCanonical(
+    /** @type {HTMLSelectElement | null} */ (document.getElementById("fractalHudDesktop")),
+    fractalSelect,
+  );
+  wireHudSelectToCanonical(
+    /** @type {HTMLSelectElement | null} */ (document.getElementById("paletteHudDesktop")),
+    paletteSelect,
+  );
+}
+
+/**
+ * @param {{
+ *   btn: HTMLButtonElement;
+ *   list: HTMLElement;
+ *   canonical: HTMLSelectElement;
+ * }} cfg
+ */
+function wireOneHudCustomMenu(cfg) {
+  const { btn, list, canonical } = cfg;
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const opening = list.hidden;
+    closeHudCustomSelectMenus();
+    if (opening) {
+      positionHudMenuList(btn, list);
+      list.hidden = false;
+      btn.setAttribute("aria-expanded", "true");
+    }
   });
-  pd?.addEventListener("change", () => {
-    if (!paletteSelect || pd.value === paletteSelect.value) return;
-    paletteSelect.value = pd.value;
-    paletteSelect.dispatchEvent(new Event("change", { bubbles: false }));
+  list.querySelectorAll("[data-value]").forEach((optBtn) => {
+    optBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const v = optBtn.getAttribute("data-value");
+      if (v == null) return;
+      if (canonical.value !== v) canonical.value = v;
+      canonical.dispatchEvent(new Event("change", { bubbles: false }));
+      closeHudCustomSelectMenus();
+      syncAllHudSelectUi();
+    });
   });
 }
 
-/** Narrow layout: custom menus; off-screen `<select id="fractal|palette">` stay canonical (see index.html). */
+/** Mobile-only custom menus (see `.showMobileOnly` in index.html); canonical values stay in `#fractal` / `#palette`. */
 function wireHudCustomSelectMenus() {
   const fractalBtn = document.getElementById("fractalMenuBtn");
   const fractalList = document.getElementById("fractalMenuList");
@@ -2468,57 +2500,9 @@ function wireHudCustomSelectMenus() {
   const paletteList = document.getElementById("paletteMenuList");
   if (!fractalSelect || !paletteSelect || !fractalBtn || !fractalList || !paletteBtn || !paletteList) return;
 
-  syncHudCustomSelectLabels();
-
-  fractalBtn.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const opening = fractalList.hidden;
-    closeHudCustomSelectMenus();
-    if (opening) {
-      positionHudMenuList(fractalBtn, fractalList);
-      fractalList.hidden = false;
-      fractalBtn.setAttribute("aria-expanded", "true");
-    }
-  });
-
-  paletteBtn.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const opening = paletteList.hidden;
-    closeHudCustomSelectMenus();
-    if (opening) {
-      positionHudMenuList(paletteBtn, paletteList);
-      paletteList.hidden = false;
-      paletteBtn.setAttribute("aria-expanded", "true");
-    }
-  });
-
-  fractalList.querySelectorAll("[data-value]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const v = btn.getAttribute("data-value");
-      if (v == null) return;
-      if (fractalSelect.value !== v) fractalSelect.value = v;
-      fractalSelect.dispatchEvent(new Event("change", { bubbles: false }));
-      closeHudCustomSelectMenus();
-      syncHudCustomSelectLabels();
-    });
-  });
-
-  paletteList.querySelectorAll("[data-value]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const v = btn.getAttribute("data-value");
-      if (v == null) return;
-      if (paletteSelect.value !== v) paletteSelect.value = v;
-      paletteSelect.dispatchEvent(new Event("change", { bubbles: false }));
-      closeHudCustomSelectMenus();
-      syncHudCustomSelectLabels();
-    });
-  });
+  syncAllHudSelectUi();
+  wireOneHudCustomMenu({ btn: fractalBtn, list: fractalList, canonical: fractalSelect });
+  wireOneHudCustomMenu({ btn: paletteBtn, list: paletteList, canonical: paletteSelect });
 
   document.addEventListener(
     "pointerdown",
@@ -2535,12 +2519,11 @@ function wireHudCustomSelectMenus() {
   });
 
   window.addEventListener("resize", closeHudCustomSelectMenus);
-  /* Opening the menu can scroll #hud (focus / layout). Closing here made desktop look “broken”. */
   hudEl?.addEventListener(
     "scroll",
     () => {
-      if (!fractalList.hidden && fractalBtn) positionHudMenuList(fractalBtn, fractalList);
-      if (!paletteList.hidden && paletteBtn) positionHudMenuList(paletteBtn, paletteList);
+      if (!fractalList.hidden) positionHudMenuList(fractalBtn, fractalList);
+      if (!paletteList.hidden) positionHudMenuList(paletteBtn, paletteList);
     },
     { passive: true },
   );
@@ -2570,7 +2553,6 @@ function applyFractalSelectChangeFromUi() {
 }
 
 fractalSelect.addEventListener("change", () => {
-  syncAllHudSelectUi();
   setTimeout(applyFractalSelectChangeFromUi, 0);
 });
 
