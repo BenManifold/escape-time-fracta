@@ -289,8 +289,8 @@ let juliaTourSpeedMult = 100;
 let juliaTourDirRe = 1;
 let juliaTourDirIm = 1;
 
-/** HUD intent for new / resumed tours (random walk off ⇒ Lissajous box sweep). */
-let juliaTourPathIntent = /** @type {"lissajous" | "randomWalk"} */ ("lissajous");
+/** HUD intent for new / resumed tours (default random walk; toggle off for Lissajous). */
+let juliaTourPathIntent = /** @type {"lissajous" | "randomWalk"} */ ("randomWalk");
 
 /** Held keys for smooth pan (arrows / WASD) and zoom (+/−). */
 const keysPanZoom = {
@@ -1107,6 +1107,7 @@ function stopJuliaLambdaTour() {
 
 /**
  * Start or resume the tour from the **current** λ (phase resync for Lissajous; random walk keeps λ until ticks).
+ * Only Julia has a λ tour; Mandelbrot / Burning Ship do not—no-ops when `fractalKind !== 1`.
  */
 function playJuliaLambdaTourFromUi() {
   if (fractalKind !== 1) return;
@@ -1153,7 +1154,7 @@ function playJuliaLambdaTourFromUi() {
 }
 
 function pauseJuliaLambdaTourFromUi() {
-  if (!juliaLambdaTour || juliaLambdaTour.paused) return;
+  if (fractalKind !== 1 || !juliaLambdaTour || juliaLambdaTour.paused) return;
   juliaLambdaTour.paused = true;
   updateJuliaTourControlsUI();
 }
@@ -2047,6 +2048,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     return;
   }
+  /* Space: λ tour play/pause — Julia only (no tour on other fractal screens yet). */
   if (e.code === "Space" && !e.repeat) {
     if (fractalKind === 1) {
       if (juliaLambdaTour && !juliaLambdaTour.paused) pauseJuliaLambdaTourFromUi();
@@ -2151,6 +2153,13 @@ async function main() {
     console.error(err);
     statusEl.textContent = "WebGPU failed to initialize.";
     return;
+  }
+
+  /* Auto-start λ tour on load (Julia only): random-walk path, then roll initial pad direction. */
+  if (fractalKind === 1) {
+    playJuliaLambdaTourFromUi();
+    randomizeJuliaTourDirQuadrant();
+    updateJuliaTourControlsUI();
   }
 
   syncStackPixelSize();
