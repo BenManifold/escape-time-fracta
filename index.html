@@ -208,9 +208,11 @@
         margin-top: 10px;
         padding: 10px 12px;
         border-radius: 8px;
-        border: 1px solid rgba(200, 160, 255, 0.35);
-        background: rgba(32, 26, 44, 0.88);
-        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+        border: 1px solid rgba(200, 160, 255, 0.18);
+        background: rgba(20, 16, 32, 0.24);
+        -webkit-backdrop-filter: blur(14px);
+        backdrop-filter: blur(14px);
+        box-shadow: 0 2px 14px rgba(0, 0, 0, 0.22);
       }
       .juliaSubPanelTitle {
         margin: 0 0 8px;
@@ -218,6 +220,7 @@
         font-weight: 600;
         color: var(--muted);
         letter-spacing: 0.03em;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
       }
       .juliaSubPanelHeader {
         display: flex;
@@ -573,6 +576,7 @@
         background: rgba(95, 214, 138, 0.35);
         box-shadow: inset 0 0 0 1px rgba(95, 214, 138, 0.55);
       }
+
       #status {
         margin-top: 8px;
         font-size: 11px;
