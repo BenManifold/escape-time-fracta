@@ -300,10 +300,6 @@
       .juliaJiggleSliderRow input[type="range"] {
         width: 100%;
       }
-      .juliaModeRow .juliaModeLabel {
-        flex: 0 0 auto;
-        font-size: 13px;
-      }
       .juliaModeSwitch {
         display: flex;
         flex: 1;
@@ -655,7 +651,6 @@
         </label>
         <div id="juliaPanel">
           <div class="juliaModeRow" role="group" aria-label="Julia canvas: box zoom or λ drag">
-            <span class="juliaModeLabel">Canvas</span>
             <div class="juliaModeSwitch">
               <button type="button" class="juliaModeBtn" id="juliaModeBox" aria-pressed="false" title="Drag a square region to zoom">
                 Box zoom
@@ -784,7 +779,7 @@
             </div>
           </div>
           <div class="juliaSubPanel" role="group" aria-labelledby="juliaLambdaPathTitle">
-            <h2 class="juliaSubPanelTitle" id="juliaLambdaPathTitle">Lambda path</h2>
+            <h2 class="juliaSubPanelTitle" id="juliaLambdaPathTitle">Lambda Tour</h2>
             <p class="juliaLambdaPathIntro">Default Lissajous box sweep; optional random walk.</p>
             <div class="juliaPathModeRow" role="group" aria-label="Random walk path">
               <button
@@ -846,7 +841,6 @@
         </div>
         <div id="mandelPanel" hidden>
           <div class="juliaModeRow" role="group" aria-label="Mandelbrot: box zoom or exponent drag">
-            <span class="juliaModeLabel">Canvas</span>
             <div class="juliaModeSwitch">
               <button type="button" class="juliaModeBtn juliaModeBtnActive" id="mandelModeBox" aria-pressed="true" title="Drag a square region to zoom">
                 Box zoom

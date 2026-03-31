@@ -1630,7 +1630,10 @@ function canvasControlHintLines() {
     "click-drag           box zoom / λ-drag",
     "shift + click-drag   λ-drag fine adjustments",
   ];
-  if (uiChromeVisible) lines.push("backspace            hide UI");
+  if (uiChromeVisible) {
+    lines.push("backspace            hide UI");
+    if (fractalKind === 1) lines.push("space                λ tour play / pause");
+  }
   return lines;
 }
 
@@ -2042,6 +2045,14 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "Backspace" && !e.repeat) {
     setUiChromeVisible(!uiChromeVisible);
     e.preventDefault();
+    return;
+  }
+  if (e.code === "Space" && !e.repeat) {
+    if (fractalKind === 1) {
+      if (juliaLambdaTour && !juliaLambdaTour.paused) pauseJuliaLambdaTourFromUi();
+      else playJuliaLambdaTourFromUi();
+      e.preventDefault();
+    }
     return;
   }
   if (!setKeyPanZoomFromCode(e.code, true)) return;
