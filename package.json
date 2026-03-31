@@ -1,0 +1,12 @@
+{
+  "name": "escape-time-fracta",
+  "private": true,
+  "scripts": {
+    "dev:https": "node scripts/dev-https.mjs",
+    "dev:https:regen": "node scripts/dev-https.mjs --regen"
+  },
+  "devDependencies": {
+    "selfsigned": "^2.4.1",
+    "serve": "^14.2.4"
+  }
+}

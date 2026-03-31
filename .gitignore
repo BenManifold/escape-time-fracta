@@ -1,2 +1,4 @@
 fractal-wasm/target/
 .cursor/
+dev-certs/
+node_modules/
